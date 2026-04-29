@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import ast
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
+from broker.ibkr_client import IbkrClient, IbkrClientConfig
+from broker.contracts import same_week_friday
+from configuration import load_settings
+from strategy.csp_scanner import run_mock_scan
+
 
 DEFAULT_JSON_PATH = Path("logs/ranked_trades.json")
 DEFAULT_CSV_PATH = Path("logs/ranked_trades.csv")
+DEFAULT_SETTINGS_PATH = Path("config/settings.yaml")
 
 
 DISPLAY_COLUMNS = [
@@ -33,6 +40,7 @@ def main() -> None:
     st.caption("Cash-secured put scan results")
 
     source_path = _source_selector()
+    _scan_controls()
     data = _load_results(source_path)
     if data.empty:
         st.warning("No scan results found. Run `python main.py scan` first.")
@@ -57,6 +65,52 @@ def _source_selector() -> Path:
         selected_path = st.text_input("File", value=str(default_path))
 
     return Path(selected_path)
+
+
+def _scan_controls() -> None:
+    with st.sidebar:
+        st.header("Scan")
+        settings_path = Path(
+            st.text_input("Settings", value=str(DEFAULT_SETTINGS_PATH))
+        )
+        broker_name = st.selectbox("Broker", options=["mock", "ibkr"], index=0)
+        expiration_date = st.date_input(
+            "Expiration",
+            value=same_week_friday(date.today()),
+        )
+        run_scan = st.button("Run Scan", type="primary", use_container_width=True)
+
+    if not run_scan:
+        return
+
+    try:
+        with st.spinner(f"Running {broker_name} scan..."):
+            settings = load_settings(settings_path)
+            broker = (
+                IbkrClient(
+                    IbkrClientConfig(
+                        host=settings.ibkr.host,
+                        port=settings.ibkr.port,
+                        client_id=settings.ibkr.client_id,
+                        market_data_type=settings.market_data.default_type,
+                    )
+                )
+                if broker_name == "ibkr"
+                else None
+            )
+            result = run_mock_scan(
+                settings,
+                broker=broker,
+                expiration_date=expiration_date,
+            )
+    except Exception as exc:
+        st.error(f"Scan failed: {exc}")
+        return
+
+    _load_results.clear()
+    st.success("Scan complete.")
+    st.code(result.console_output)
+    st.rerun()
 
 
 @st.cache_data(show_spinner=False)

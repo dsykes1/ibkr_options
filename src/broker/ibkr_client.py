@@ -16,6 +16,8 @@ from data.models import OptionQuote, UnderlyingQuote
 
 LOGGER = logging.getLogger(__name__)
 
+IBKR_CONNECTIVITY_INFO_CODES = {2104, 2106, 2158}
+
 IBKR_MARKET_DATA_TYPES = {
     1: "live",
     2: "frozen",
@@ -28,6 +30,9 @@ TICK_BID = 1
 TICK_ASK = 2
 TICK_LAST = 4
 TICK_VOLUME = 8
+TICK_BID_OPTION_COMPUTATION = 10
+TICK_ASK_OPTION_COMPUTATION = 11
+TICK_LAST_OPTION_COMPUTATION = 12
 TICK_MODEL_OPTION_COMPUTATION = 13
 TICK_PUT_OPEN_INTEREST = 28
 TICK_PUT_VOLUME = 30
@@ -35,6 +40,9 @@ TICK_DELAYED_BID = 66
 TICK_DELAYED_ASK = 67
 TICK_DELAYED_LAST = 68
 TICK_DELAYED_VOLUME = 74
+TICK_DELAYED_BID_OPTION_COMPUTATION = 80
+TICK_DELAYED_ASK_OPTION_COMPUTATION = 81
+TICK_DELAYED_LAST_OPTION_COMPUTATION = 82
 TICK_DELAYED_MODEL_OPTION_COMPUTATION = 83
 
 GENERIC_TICKS_OPTION_VOLUME_OPEN_INTEREST = "100,101"
@@ -124,7 +132,7 @@ class IbkrClient(Broker):
 
         if not app.connected_event.wait(self.config.connect_timeout):
             app.disconnect()
-            raise TimeoutError("Timed out waiting for IBKR nextValidId callback.")
+            raise TimeoutError("Timed out waiting for IBKR API readiness callback.")
 
         market_data_type_code = IBKR_MARKET_DATA_TYPE_CODES.get(
             self.config.market_data_type,
@@ -201,22 +209,9 @@ class IbkrClient(Broker):
         spot = underlying_quote[0].last_price if underlying_quote else None
         definitions = self._option_definitions(request, underlying, spot)
         option_quotes: list[OptionQuote] = []
+        snapshots = self._request_option_market_data_batch(definitions)
 
-        for definition in definitions:
-            contract = _option_contract(definition)
-            snapshot = self._request_market_data(
-                contract=contract,
-                generic_ticks=GENERIC_TICKS_OPTION_VOLUME_OPEN_INTEREST,
-                description=f"option {definition.symbol}",
-                essential_fields=[
-                    "bid",
-                    "ask",
-                    "implied_volatility",
-                    "delta",
-                    "open_interest",
-                    "option_volume",
-                ],
-            )
+        for definition, snapshot in snapshots:
             quote = self._normalize_option_quote(definition, snapshot)
             if quote is not None:
                 option_quotes.append(quote)
@@ -315,7 +310,9 @@ class IbkrClient(Broker):
             )
 
         params = self._app.option_params.pop(req_id, [])
-        target_expiry = same_week_friday(request.as_of).strftime("%Y%m%d")
+        target_expiry = (request.expiration_date or same_week_friday(request.as_of)).strftime(
+            "%Y%m%d"
+        )
         right = "P" if request.option_right == "put" else "C"
         definitions: list[_OptionDefinition] = []
 
@@ -359,6 +356,60 @@ class IbkrClient(Broker):
         )
         return limited
 
+    def _request_option_market_data_batch(
+        self,
+        definitions: list[_OptionDefinition],
+    ) -> list[tuple[_OptionDefinition, IbkrMarketDataSnapshot]]:
+        essential_fields = [
+            "bid",
+            "ask",
+            "implied_volatility",
+            "delta",
+            "open_interest",
+            "option_volume",
+        ]
+        active_requests: dict[int, _OptionDefinition] = {}
+
+        for definition in definitions:
+            req_id = self._app.next_req_id()
+            active_requests[req_id] = definition
+            self._app.market_data[req_id] = IbkrMarketDataSnapshot()
+            self._app.reqMktData(
+                req_id,
+                _option_contract(definition),
+                GENERIC_TICKS_OPTION_VOLUME_OPEN_INTEREST,
+                False,
+                False,
+                [],
+            )
+
+        if active_requests:
+            self.logger.info(
+                "IBKR batch reqMktData started for %s option contracts.",
+                len(active_requests),
+            )
+
+        deadline = time.monotonic() + self.config.market_data_timeout
+        while time.monotonic() < deadline:
+            if all(
+                _has_all(self._app.market_data[req_id], essential_fields)
+                for req_id in active_requests
+            ):
+                break
+            time.sleep(0.05)
+
+        results: list[tuple[_OptionDefinition, IbkrMarketDataSnapshot]] = []
+        for req_id, definition in active_requests.items():
+            self._app.cancelMktData(req_id)
+            snapshot = self._app.market_data.pop(req_id, IbkrMarketDataSnapshot())
+            snapshot.unavailable_fields = [
+                field for field in essential_fields if getattr(snapshot, field) is None
+            ]
+            self._log_data_quality(f"option {definition.symbol}", snapshot)
+            results.append((definition, snapshot))
+
+        return results
+
     def _request_market_data(
         self,
         *,
@@ -380,8 +431,7 @@ class IbkrClient(Broker):
         deadline = time.monotonic() + self.config.market_data_timeout
         while time.monotonic() < deadline:
             snapshot = self._app.market_data[req_id]
-            if _has_any(snapshot, essential_fields):
-                time.sleep(0.25)
+            if _has_all(snapshot, essential_fields):
                 break
             time.sleep(0.05)
 
@@ -475,7 +525,7 @@ class _IbkrApp:
         class App(EWrapper, EClient):  # type: ignore[misc, valid-type]
             pass
 
-        self.__class__ = type("_RuntimeIbkrApp", (App, _IbkrApp), {})
+        self.__class__ = type("_RuntimeIbkrApp", (_IbkrApp, App), {})
         EWrapper.__init__(self)
         EClient.__init__(self, wrapper=self)
         self.logger = logger
@@ -511,7 +561,21 @@ class _IbkrApp:
         self.logger.info("IBKR connected; nextValidId=%s.", orderId)
 
     def error(self, reqId: int, errorCode: int, errorString: str, *args: Any) -> None:  # noqa: N802
+        if errorCode in IBKR_CONNECTIVITY_INFO_CODES:
+            self.connected_event.set()
+            self.logger.info(
+                "IBKR connectivity status reqId=%s code=%s: %s",
+                reqId,
+                errorCode,
+                errorString,
+            )
+            return
+
         self.logger.warning("IBKR error reqId=%s code=%s: %s", reqId, errorCode, errorString)
+
+    def managedAccounts(self, accountsList: str) -> None:  # noqa: N802
+        self.connected_event.set()
+        self.logger.info("IBKR managed accounts received.")
 
     def contractDetails(self, reqId: int, contractDetails: Any) -> None:  # noqa: N802
         self.contract_details.setdefault(reqId, []).append(contractDetails)
@@ -592,7 +656,13 @@ class _IbkrApp:
         undPrice: float,
     ) -> None:
         if tickType not in {
+            TICK_BID_OPTION_COMPUTATION,
+            TICK_ASK_OPTION_COMPUTATION,
+            TICK_LAST_OPTION_COMPUTATION,
             TICK_MODEL_OPTION_COMPUTATION,
+            TICK_DELAYED_BID_OPTION_COMPUTATION,
+            TICK_DELAYED_ASK_OPTION_COMPUTATION,
+            TICK_DELAYED_LAST_OPTION_COMPUTATION,
             TICK_DELAYED_MODEL_OPTION_COMPUTATION,
         }:
             return
@@ -652,8 +722,8 @@ def _midpoint(bid: Decimal | None, ask: Decimal | None) -> Decimal:
     raise ValueError("Cannot compute midpoint without bid or ask.")
 
 
-def _has_any(snapshot: IbkrMarketDataSnapshot, fields: list[str]) -> bool:
-    return any(getattr(snapshot, field) is not None for field in fields)
+def _has_all(snapshot: IbkrMarketDataSnapshot, fields: list[str]) -> bool:
+    return all(getattr(snapshot, field) is not None for field in fields)
 
 
 def _strike_near_spot(

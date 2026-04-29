@@ -57,6 +57,7 @@ def write_scan_outputs(
 def summarize_console(
     sizing_result: PositionSizingResult,
     paths: ReportPaths,
+    broker_name: str = "broker",
 ) -> str:
     allocated = [
         decision
@@ -70,7 +71,7 @@ def summarize_console(
         or decision.suggested_contracts == 0
     ]
     lines = [
-        "Mock scan complete.",
+        f"{broker_name} scan complete.",
         f"Ranked trades: {len(sizing_result.decisions)}",
         f"Suggested positions: {len(allocated)}",
         f"Rejected/skipped trades: {len(rejected)}",

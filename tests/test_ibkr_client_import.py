@@ -1,4 +1,6 @@
-from broker.ibkr_client import IBKR_MARKET_DATA_TYPES, IbkrClientConfig
+import logging
+
+from broker.ibkr_client import IBKR_MARKET_DATA_TYPES, IbkrClientConfig, _IbkrApp, _load_ibapi
 from strategy.models import RiskFlag
 
 
@@ -25,3 +27,12 @@ def test_ibkr_config_loads_from_environment(monkeypatch) -> None:
 
 def test_data_quality_warning_flag_exists() -> None:
     assert RiskFlag.DATA_QUALITY_WARNING == "data_quality_warning"
+
+
+def test_connectivity_info_callback_marks_ibkr_app_ready() -> None:
+    EClient, EWrapper, _Contract = _load_ibapi()
+    app = _IbkrApp(EWrapper=EWrapper, EClient=EClient, logger=logging.getLogger(__name__))
+
+    app.error(-1, 2104, "Market data farm connection is OK:usfarm")
+
+    assert app.connected_event.is_set()

@@ -23,6 +23,7 @@ class OptionChainRequest:
     option_right: OptionRight = "put"
     min_strike: Decimal | None = None
     max_strike: Decimal | None = None
+    expiration_date: date | None = None
     as_of: date | None = None
 
 

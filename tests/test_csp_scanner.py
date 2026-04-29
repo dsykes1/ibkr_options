@@ -1,7 +1,12 @@
 import json
 
 from configuration import load_settings
-from broker.mock_broker import MOCK_OPTION_CHAINS, MOCK_UNDERLYING_QUOTES, MockBroker
+from broker.mock_broker import (
+    MOCK_OPTION_CHAINS,
+    MOCK_UNDERLYING_QUOTES,
+    MockBroker,
+    NEXT_FRIDAY,
+)
 from strategy.csp_scanner import run_mock_scan
 from strategy.models import EligibilityStatus, RiskFlag
 
@@ -17,7 +22,7 @@ def test_run_mock_scan_produces_ranked_rejected_and_report_files(tmp_path) -> No
     assert result.report_paths.ranked_csv.exists()
     assert result.report_paths.rejected_json.exists()
     assert result.report_paths.decision_log.exists()
-    assert "Mock scan complete." in result.console_output
+    assert "MockBroker scan complete." in result.console_output
 
     ranked_rows = json.loads(result.report_paths.ranked_json.read_text(encoding="utf-8"))
     rejected_rows = json.loads(
@@ -75,3 +80,19 @@ def test_scan_rejects_delayed_data_when_config_requires_live(tmp_path) -> None:
         RiskFlag.DATA_QUALITY_WARNING in trade.candidate.risk_flags
         for trade in result.ranked_trades
     )
+
+
+def test_run_mock_scan_can_target_specific_expiration(tmp_path) -> None:
+    settings = load_settings()
+
+    result = run_mock_scan(
+        settings,
+        output_dir=tmp_path,
+        expiration_date=NEXT_FRIDAY,
+    )
+
+    assert result.ranked_trades
+    assert {
+        trade.candidate.option.expiration_date.date()
+        for trade in result.ranked_trades
+    } == {NEXT_FRIDAY}

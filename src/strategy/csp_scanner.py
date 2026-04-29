@@ -13,7 +13,8 @@ from broker.base import Broker
 from broker.mock_broker import MOCK_AS_OF, MockBroker
 from configuration import Settings
 from data.models import OptionQuote, UnderlyingQuote
-from data.options_chain import fetch_same_week_option_chains
+from broker.contracts import same_week_friday
+from data.options_chain import fetch_option_chains_for_expiry
 from data.universe import load_universe
 from portfolio.sizing import PositionSizingResult, size_ranked_trades
 from reporting.logger import DecisionLogger
@@ -36,6 +37,7 @@ def run_mock_scan(
     broker: Broker | None = None,
     output_dir: Path = Path("logs"),
     as_of: date = MOCK_AS_OF,
+    expiration_date: date | None = None,
 ) -> ScanResult:
     """Run an end-to-end cash-secured put scan using a broker adapter."""
     decision_logger = DecisionLogger()
@@ -48,14 +50,18 @@ def run_mock_scan(
     quotes = {quote.symbol: quote for quote in broker.fetch_underlying_quotes(universe)}
     decision_logger.record(f"Fetched {len(quotes)} underlying quotes.")
 
-    chains = fetch_same_week_option_chains(
+    selected_expiration = expiration_date or same_week_friday(as_of)
+    decision_logger.record(f"Selected expiration: {selected_expiration.isoformat()}.")
+    chains = fetch_option_chains_for_expiry(
         broker=broker,
         symbols=list(quotes),
         scan_config=settings.scanner,
+        expiration_date=selected_expiration,
         as_of=as_of,
     )
     decision_logger.record(
-        f"Fetched {sum(len(chain) for chain in chains.values())} same-week option contracts."
+        f"Fetched {sum(len(chain) for chain in chains.values())} option contracts "
+        f"for {selected_expiration.isoformat()}."
     )
 
     ranker_inputs: list[RankerInput] = []
@@ -91,7 +97,11 @@ def run_mock_scan(
         decision_log_path=log_path,
         output_dir=output_dir,
     )
-    console_output = summarize_console(sizing_result, report_paths)
+    console_output = summarize_console(
+        sizing_result,
+        report_paths,
+        broker_name=broker.__class__.__name__,
+    )
 
     rejected_trades = [
         decision.ranked_trade

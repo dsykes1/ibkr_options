@@ -24,7 +24,7 @@ def test_scan_command_is_available() -> None:
     result = runner.invoke(app, ["scan"])
 
     assert result.exit_code == 0
-    assert "Mock scan complete." in result.stdout
+    assert "MockBroker scan complete." in result.stdout
 
 
 def test_domain_enums_are_string_values() -> None:
