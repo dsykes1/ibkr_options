@@ -1,0 +1,61 @@
+app:
+  name: ibkr-options
+  environment: development
+  log_level: INFO
+
+ibkr:
+  host: 127.0.0.1
+  port: 7497
+  client_id: 1
+
+market_data:
+  default_type: live
+  allow_delayed_fallback: false
+  reject_if_delayed: true
+  require_bid_ask: true
+  require_greeks: true
+  require_iv: true
+  require_open_interest: true
+  require_option_volume: true
+
+scanner:
+  account_size: 50000
+  max_positions: 5
+  max_per_ticker_exposure: 25000
+  universe:
+    - AAPL
+    - MSFT
+    - SPY
+    - TQQQ
+  option_type: put
+  expiration_scope: weekly
+  currency: USD
+  ranking_mode: ultra_safe
+  default_filters:
+    min_underlying_price: 10
+    max_underlying_price: 250
+    min_option_volume: 10
+    min_open_interest: 100
+    max_bid_ask_spread_pct: 15
+    min_days_to_expiration: 1
+    max_days_to_expiration: 7
+    exclude_earnings_within_days: 7
+  ranking_modes:
+    ultra_safe:
+      name: ultra_safe
+      enabled: true
+      description: Prioritize conservative cash-secured put candidates.
+      min_premium: 20
+      min_annualized_return_pct: 8
+      max_delta: 0.25
+      max_contracts_per_trade: 1
+      prefer_lower_assignment_risk: true
+    capital_efficient:
+      name: capital_efficient
+      enabled: true
+      description: Prioritize efficient use of available cash while staying within risk limits.
+      min_premium: 15
+      min_annualized_return_pct: 12
+      max_delta: 0.35
+      max_contracts_per_trade: 2
+      prefer_lower_assignment_risk: false
