@@ -37,11 +37,11 @@ def run_mock_scan(
     output_dir: Path = Path("logs"),
     as_of: date = MOCK_AS_OF,
 ) -> ScanResult:
-    """Run an end-to-end cash-secured put scan using the mock broker."""
+    """Run an end-to-end cash-secured put scan using a broker adapter."""
     decision_logger = DecisionLogger()
     broker = broker or MockBroker()
     broker.connect()
-    decision_logger.record("Connected to mock broker.")
+    decision_logger.record(f"Connected to {broker.__class__.__name__}.")
 
     universe = load_universe(settings.scanner)
     decision_logger.record(f"Loaded universe: {', '.join(universe)}.")

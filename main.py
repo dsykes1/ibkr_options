@@ -53,7 +53,27 @@ def scan(
         if broker_name == "ibkr"
         else None
     )
-    result = run_mock_scan(settings, broker=broker)
+    try:
+        result = run_mock_scan(settings, broker=broker)
+    except TimeoutError as exc:
+        if broker_name != "ibkr":
+            raise
+
+        raise typer.BadParameter(
+            "\nCould not connect to IBKR TWS/IB Gateway.\n"
+            f"Configured endpoint: {settings.ibkr.host}:{settings.ibkr.port} "
+            f"client_id={settings.ibkr.client_id}\n\n"
+            "Check these items:\n"
+            "  1. TWS or IB Gateway is open and logged in.\n"
+            "  2. API socket clients are enabled in TWS/Gateway settings.\n"
+            "  3. The configured port matches your session:\n"
+            "     - TWS paper: 7497\n"
+            "     - TWS live: 7496\n"
+            "     - Gateway paper: 4002\n"
+            "     - Gateway live: 4001\n"
+            "  4. No other app is already using the same IBKR client ID.\n\n"
+            f"Original error: {exc}"
+        ) from exc
     typer.echo(result.console_output)
 
 
