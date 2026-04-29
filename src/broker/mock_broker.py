@@ -11,6 +11,7 @@ from broker.contracts import (
     same_week_friday,
 )
 from data.models import OptionQuote, UnderlyingQuote
+from portfolio.models import PortfolioSnapshot
 
 
 MOCK_AS_OF = date(2026, 4, 29)
@@ -259,6 +260,16 @@ class MockBroker(Broker):
             for symbol in symbols
             if symbol.upper() in self._underlying_quotes
         ]
+
+    def fetch_portfolio_snapshot(self) -> PortfolioSnapshot:
+        self._ensure_connected()
+        return PortfolioSnapshot(
+            account_id="mock",
+            net_liquidation=Decimal("50000"),
+            free_cash=Decimal("25000"),
+            currency="USD",
+            data_source="mock",
+        )
 
     def fetch_option_chain(self, request: OptionChainRequest) -> list[OptionQuote]:
         self._ensure_connected()

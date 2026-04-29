@@ -31,6 +31,7 @@ DISPLAY_COLUMNS = [
     "risk_flags_display",
     "suggested_contracts",
     "capital_required",
+    "target_eligible",
 ]
 
 
@@ -40,16 +41,31 @@ def main() -> None:
     st.caption("Cash-secured put scan results")
 
     source_path = _source_selector()
-    _scan_controls()
-    data = _load_results(source_path)
+    settings_path = _scan_controls()
+    data, target_summary = _load_results(source_path)
     if data.empty:
-        st.warning("No scan results found. Run `python main.py scan` first.")
+        last_console = st.session_state.get("last_scan_console_output")
+        last_broker = st.session_state.get("last_scan_broker")
+        last_count = st.session_state.get("last_scan_trade_count")
+        if last_console is not None:
+            st.warning("Last scan completed but returned zero candidates.")
+            if last_broker == "ibkr":
+                st.info(
+                    "IBKR returned no candidates for current filters/expiry/universe. "
+                    "Try widening filters (price range, DTE) or confirm market data permissions."
+                )
+            st.code(last_console)
+            if last_count == 0:
+                st.caption("No candidate contracts were ranked for this run.")
+        else:
+            st.warning("No scan results found. Run `python main.py scan` first.")
         return
 
     filtered = _filters(data)
     sorted_data = _sort_controls(filtered)
 
-    _summary_cards(sorted_data)
+    _target_cards(target_summary)
+    _summary_cards(sorted_data, settings_path)
     _ranked_table(sorted_data)
     _score_breakdown_chart(sorted_data)
 
@@ -67,7 +83,7 @@ def _source_selector() -> Path:
     return Path(selected_path)
 
 
-def _scan_controls() -> None:
+def _scan_controls() -> Path:
     with st.sidebar:
         st.header("Scan")
         settings_path = Path(
@@ -81,7 +97,7 @@ def _scan_controls() -> None:
         run_scan = st.button("Run Scan", type="primary", use_container_width=True)
 
     if not run_scan:
-        return
+        return settings_path
 
     try:
         with st.spinner(f"Running {broker_name} scan..."):
@@ -104,27 +120,41 @@ def _scan_controls() -> None:
                 expiration_date=expiration_date,
             )
     except Exception as exc:
+        st.session_state["last_scan_console_output"] = None
+        st.session_state["last_scan_broker"] = broker_name
+        st.session_state["last_scan_trade_count"] = 0
         st.error(f"Scan failed: {exc}")
-        return
+        st.stop()
 
-    _load_results.clear()
+    st.session_state["last_scan_console_output"] = result.console_output
+    st.session_state["last_scan_broker"] = broker_name
+    st.session_state["last_scan_trade_count"] = len(result.sizing_result.decisions)
+
     st.success("Scan complete.")
     st.code(result.console_output)
     st.rerun()
+    return settings_path
 
 
-@st.cache_data(show_spinner=False)
-def _load_results(path: Path) -> pd.DataFrame:
+def _load_results(path: Path) -> tuple[pd.DataFrame, dict]:
     if not path.exists():
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
 
     if path.suffix.lower() == ".csv":
         data = pd.read_csv(path)
+        target_summary: dict = {}
     else:
-        data = pd.read_json(path)
+        import json as _json
+        raw_dict = _json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw_dict, dict) and "trades" in raw_dict:
+            data = pd.DataFrame(raw_dict["trades"])
+            target_summary = raw_dict.get("target_summary", {})
+        else:
+            data = pd.DataFrame(raw_dict)
+            target_summary = {}
 
     if data.empty:
-        return data
+        return data, target_summary
 
     data = data.copy()
     data["risk_flags"] = data["risk_flags"].apply(_parse_flags)
@@ -145,7 +175,10 @@ def _load_results(path: Path) -> pd.DataFrame:
         if column in data:
             data[column] = pd.to_numeric(data[column], errors="coerce")
 
-    return data
+    if "target_eligible" not in data:
+        data["target_eligible"] = True
+
+    return data, target_summary
 
 
 def _filters(data: pd.DataFrame) -> pd.DataFrame:
@@ -174,6 +207,7 @@ def _filters(data: pd.DataFrame) -> pd.DataFrame:
         )
         selected_flags = st.multiselect("Flags", options=all_flags)
 
+        target_eligible_only = st.checkbox("Target-eligible trades only", value=False)
         min_pop = st.slider("Minimum POP", 0.0, 1.0, 0.0, 0.01)
         min_return = st.slider("Minimum annualized return", 0.0, 3.0, 0.0, 0.01)
 
@@ -183,6 +217,9 @@ def _filters(data: pd.DataFrame) -> pd.DataFrame:
         & (data["probability_of_profit"].fillna(0) >= min_pop)
         & (data["annualized_return"].fillna(0) >= min_return)
     ]
+
+    if target_eligible_only and "target_eligible" in filtered.columns:
+        filtered = filtered[filtered["target_eligible"].fillna(True)]
 
     if selected_flags:
         filtered = filtered[
@@ -213,17 +250,47 @@ def _sort_controls(data: pd.DataFrame) -> pd.DataFrame:
     return data.sort_values(sort_column, ascending=not descending, na_position="last")
 
 
-def _summary_cards(data: pd.DataFrame) -> None:
+def _target_cards(target_summary: dict) -> None:
+    if not target_summary:
+        return
+    st.subheader("Weekly Premium Target")
+    weekly_target = target_summary.get("target_weekly_premium", 0)
+    captured = target_summary.get("premium_captured", 0)
+    achieved_pct = target_summary.get("target_achieved_pct", 0)
+    target_met = target_summary.get("target_met", False)
+    unused_cash = target_summary.get("unused_cash", 0)
+
+    cols = st.columns(4)
+    cols[0].metric("Weekly Target", f"${weekly_target:,.2f}")
+    cols[1].metric(
+        "Premium Captured",
+        f"${captured:,.2f}",
+        delta=f"{achieved_pct:.1f}% of target",
+        delta_color="normal" if target_met else "off",
+    )
+    cols[2].metric("Target Achieved", f"{achieved_pct:.1f}%", delta="Met" if target_met else "Not met")
+    cols[3].metric("Unused Cash", f"${unused_cash:,.2f}")
+
+
+def _summary_cards(data: pd.DataFrame, settings_path: Path) -> None:
+    portfolio_value, free_cash = _load_portfolio_values(data, settings_path)
     recommended = data[data["suggested_contracts"].fillna(0) > 0]
     avg_pop = data["probability_of_profit"].mean()
     avg_return = data["annualized_return"].mean()
     total_capital = recommended["capital_required"].sum()
+    unused_cash = max(free_cash - total_capital, 0)
+    capital_used_pct = total_capital / free_cash if free_cash else 0
 
     cols = st.columns(4)
-    cols[0].metric("Avg POP", _format_pct(avg_pop))
-    cols[1].metric("Avg Annualized Return", _format_pct(avg_return))
-    cols[2].metric("Total Capital Used", f"${total_capital:,.0f}")
-    cols[3].metric("Recommended Trades", f"{len(recommended)}")
+    cols[0].metric("Portfolio Value", f"${portfolio_value:,.0f}")
+    cols[1].metric("Free Cash", f"${free_cash:,.0f}")
+    cols[2].metric("Capital Used", f"${total_capital:,.0f}", _format_pct(capital_used_pct))
+    cols[3].metric("Unused Cash", f"${unused_cash:,.0f}")
+
+    cols = st.columns(3)
+    cols[0].metric("Recommended Trades", f"{len(recommended)}")
+    cols[1].metric("Avg POP", _format_pct(avg_pop))
+    cols[2].metric("Avg Annualized Return", _format_pct(avg_return))
 
 
 def _ranked_table(data: pd.DataFrame) -> None:
@@ -285,6 +352,25 @@ def _highlight_flagged_rows(row: pd.Series) -> list[str]:
     if flags:
         return ["background-color: #fff7dc"] * len(row)
     return [""] * len(row)
+
+
+def _load_portfolio_values(data: pd.DataFrame, settings_path: Path) -> tuple[float, float]:
+    if "portfolio_value" in data and data["portfolio_value"].notna().any():
+        portfolio_value = float(data["portfolio_value"].dropna().iloc[0])
+        free_cash = (
+            float(data["free_cash"].dropna().iloc[0])
+            if "free_cash" in data and data["free_cash"].notna().any()
+            else portfolio_value
+        )
+        return portfolio_value, free_cash
+
+    try:
+        settings = load_settings(settings_path)
+    except Exception:
+        return 0, 0
+
+    account_size = float(settings.scanner.account_size)
+    return account_size, account_size
 
 
 def _parse_flags(value: Any) -> list[str]:

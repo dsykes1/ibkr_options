@@ -16,6 +16,7 @@ from data.models import OptionQuote, UnderlyingQuote
 from broker.contracts import same_week_friday
 from data.options_chain import fetch_option_chains_for_expiry
 from data.universe import load_universe
+from data.universe_discovery import KNOWN_LEVERAGED_ETFS, build_universe, filter_by_volume
 from portfolio.sizing import PositionSizingResult, size_ranked_trades
 from reporting.logger import DecisionLogger
 from reporting.output import ReportPaths, summarize_console, write_scan_outputs
@@ -45,17 +46,43 @@ def run_mock_scan(
     broker.connect()
     decision_logger.record(f"Connected to {broker.__class__.__name__}.")
 
-    universe = load_universe(settings.scanner)
+    portfolio_snapshot = broker.fetch_portfolio_snapshot()
+    # Fix: preserve configured max_per_ticker_exposure; only cap it at free_cash
+    # so concentration controls remain meaningful even when cash is large.
+    effective_scan_config = settings.scanner.model_copy(
+        update={
+            "account_size": float(portfolio_snapshot.free_cash),
+            "max_per_ticker_exposure": min(
+                settings.scanner.max_per_ticker_exposure,
+                float(portfolio_snapshot.free_cash),
+            ),
+        }
+    )
+    effective_settings = settings.model_copy(update={"scanner": effective_scan_config})
+    decision_logger.record(
+        f"Portfolio snapshot: net_liquidation=${portfolio_snapshot.net_liquidation:,.2f}, "
+        f"free_cash=${portfolio_snapshot.free_cash:,.2f}, "
+        f"source={portfolio_snapshot.data_source}."
+    )
+
+    # Universe discovery: use build_universe which respects discovery config
+    universe = build_universe(effective_scan_config)
     decision_logger.record(f"Loaded universe: {', '.join(universe)}.")
     quotes = {quote.symbol: quote for quote in broker.fetch_underlying_quotes(universe)}
     decision_logger.record(f"Fetched {len(quotes)} underlying quotes.")
+
+    # Pre-scan underlying filter
+    quotes = _filter_underlyings(quotes, effective_scan_config, decision_logger)
+    decision_logger.record(
+        f"After pre-scan filter: {len(quotes)} underlyings remain."
+    )
 
     selected_expiration = expiration_date or same_week_friday(as_of)
     decision_logger.record(f"Selected expiration: {selected_expiration.isoformat()}.")
     chains = fetch_option_chains_for_expiry(
         broker=broker,
         symbols=list(quotes),
-        scan_config=settings.scanner,
+        scan_config=effective_scan_config,
         expiration_date=selected_expiration,
         as_of=as_of,
     )
@@ -71,7 +98,7 @@ def run_mock_scan(
             ranker_input = _evaluate_option(
                 underlying=underlying,
                 option=option,
-                settings=settings,
+                settings=effective_settings,
                 as_of=as_of,
                 decision_logger=decision_logger,
             )
@@ -79,13 +106,17 @@ def run_mock_scan(
 
     ranked_trades = rank_candidates(
         ranker_inputs,
-        mode=settings.scanner.ranking_mode,
+        mode=effective_scan_config.ranking_mode,
     )
     decision_logger.record(
-        f"Ranked {len(ranked_trades)} candidates using {settings.scanner.ranking_mode} mode."
+        f"Ranked {len(ranked_trades)} candidates using {effective_scan_config.ranking_mode} mode."
     )
 
-    sizing_result = size_ranked_trades(ranked_trades, settings.scanner)
+    sizing_result = size_ranked_trades(
+        ranked_trades,
+        effective_scan_config,
+        portfolio_snapshot=portfolio_snapshot,
+    )
     decision_logger.record(
         f"Allocated {sizing_result.positions_allocated} positions "
         f"using ${sizing_result.total_allocated:,.2f}."
@@ -297,3 +328,69 @@ def _format_optional_float(value: float | None) -> str:
         return "unavailable"
 
     return f"{value:.3f}"
+
+
+def _filter_underlyings(
+    quotes: dict[str, UnderlyingQuote],
+    scan_config,
+    decision_logger: DecisionLogger,
+) -> dict[str, UnderlyingQuote]:
+    """Apply pre-scan underlying-level filters before option chain fetch.
+
+    Filters applied (all config-driven):
+    - Price range (min/max_underlying_price)
+    - Leveraged ETF exclusion (if universe_discovery.exclude_leveraged_etfs)
+    - Minimum underlying volume (if universe_discovery.min_underlying_volume set)
+    - Collateral feasibility (at least 1 contract fits account)
+    - Earnings placeholder: warns but does not reject (data unavailable)
+    """
+    filters = scan_config.default_filters
+    disc = scan_config.universe_discovery
+    account_size = scan_config.account_size
+    result: dict[str, UnderlyingQuote] = {}
+
+    for symbol, quote in quotes.items():
+        reasons: list[str] = []
+        price = float(quote.last_price)
+
+        if filters.min_underlying_price is not None and price < filters.min_underlying_price:
+            reasons.append(
+                f"price {price:.2f} below min {filters.min_underlying_price}"
+            )
+
+        if filters.max_underlying_price is not None and price > filters.max_underlying_price:
+            reasons.append(
+                f"price {price:.2f} above max {filters.max_underlying_price}"
+            )
+
+        if disc.exclude_leveraged_etfs and symbol in KNOWN_LEVERAGED_ETFS:
+            reasons.append("leveraged_etf")
+
+        if disc.min_underlying_volume is not None:
+            vol = quote.volume or quote.average_volume
+            if vol is not None and vol < disc.min_underlying_volume:
+                reasons.append(
+                    f"volume {vol} below min {disc.min_underlying_volume}"
+                )
+
+        # Collateral feasibility: strike roughly ~underlying price; skip if can't fill 1 contract
+        min_collateral = price * 100 * 0.70  # rough OTM assumption
+        if min_collateral > account_size:
+            reasons.append(
+                f"collateral ~${min_collateral:,.0f} exceeds account ${account_size:,.0f}"
+            )
+
+        if reasons:
+            decision_logger.record(
+                f"Filtered underlying {symbol}: {'; '.join(reasons)}."
+            )
+            continue
+
+        # Earnings placeholder — warn only; data not yet available
+        decision_logger.record(
+            f"Underlying {symbol} passed pre-scan filter "
+            f"(earnings data unavailable — manual check recommended)."
+        )
+        result[symbol] = quote
+
+    return result

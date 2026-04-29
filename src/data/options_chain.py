@@ -39,7 +39,7 @@ def fetch_option_chains_for_expiry(
             underlying_symbol=symbol,
             option_right=scan_config.option_type,
             min_strike=_to_decimal(scan_config.default_filters.min_underlying_price),
-            max_strike=None,
+            max_strike=_max_strike_for_cash_secured_put(scan_config),
             expiration_date=expiration_date,
             as_of=as_of,
         )
@@ -58,3 +58,10 @@ def _to_decimal(value: float | int | None) -> Decimal | None:
         return None
 
     return Decimal(str(value))
+
+
+def _max_strike_for_cash_secured_put(scan_config: ScanConfig) -> Decimal | None:
+    if scan_config.option_type != "put":
+        return None
+
+    return Decimal(str(scan_config.max_per_ticker_exposure)) / Decimal("100")

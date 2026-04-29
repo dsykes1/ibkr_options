@@ -9,6 +9,24 @@ RankingModeName = Literal["ultra_safe", "capital_efficient"]
 MarketDataTypeName = Literal["live", "frozen", "delayed", "delayed_frozen"]
 
 
+class PortfolioTargetsConfig(BaseModel):
+    weekly_return_target_pct: float = Field(default=0.5, gt=0)
+    min_pop: float = Field(default=0.95, ge=0, le=1)
+    allow_partial_target: bool = True
+    reject_if_target_requires_low_quality_trades: bool = True
+
+
+class UniverseDiscoveryConfig(BaseModel):
+    enabled: bool = True
+    use_configured_universe_first: bool = True
+    include_sp500: bool = False
+    include_nasdaq100: bool = False
+    include_etfs: bool = True
+    exclude_leveraged_etfs: bool = True
+    min_underlying_volume: int | None = Field(default=None, ge=0)
+    max_symbols: int | None = Field(default=None, gt=0)
+
+
 class AppConfig(BaseModel):
     name: str = "ibkr-options"
     environment: str = "development"
@@ -65,6 +83,8 @@ class ScanConfig(BaseModel):
     default_filters: DefaultFiltersConfig = Field(default_factory=DefaultFiltersConfig)
     ranking_mode: RankingModeName = "ultra_safe"
     ranking_modes: dict[RankingModeName, RankingModeConfig]
+    portfolio_targets: PortfolioTargetsConfig = Field(default_factory=PortfolioTargetsConfig)
+    universe_discovery: UniverseDiscoveryConfig = Field(default_factory=UniverseDiscoveryConfig)
 
 
 class Settings(BaseModel):

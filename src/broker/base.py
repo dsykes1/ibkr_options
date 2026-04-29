@@ -5,6 +5,7 @@ from datetime import date
 
 from broker.contracts import OptionChainRequest
 from data.models import OptionQuote, UnderlyingQuote
+from portfolio.models import PortfolioSnapshot
 
 
 class Broker(ABC):
@@ -26,6 +27,10 @@ class Broker(ABC):
     @abstractmethod
     def fetch_underlying_quotes(self, symbols: list[str]) -> list[UnderlyingQuote]:
         """Return latest underlying quotes for requested symbols."""
+
+    @abstractmethod
+    def fetch_portfolio_snapshot(self) -> PortfolioSnapshot:
+        """Return account value and free cash available for cash-secured puts."""
 
     @abstractmethod
     def fetch_option_chain(self, request: OptionChainRequest) -> list[OptionQuote]:

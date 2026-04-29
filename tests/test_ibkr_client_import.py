@@ -1,6 +1,15 @@
 import logging
+from decimal import Decimal
 
-from broker.ibkr_client import IBKR_MARKET_DATA_TYPES, IbkrClientConfig, _IbkrApp, _load_ibapi
+from broker.ibkr_client import (
+    IBKR_MARKET_DATA_TYPES,
+    IbkrClientConfig,
+    _OptionDefinition,
+    _IbkrApp,
+    _dedupe_option_definitions,
+    _load_ibapi,
+    _select_relevant_strikes,
+)
 from strategy.models import RiskFlag
 
 
@@ -36,3 +45,34 @@ def test_connectivity_info_callback_marks_ibkr_app_ready() -> None:
     app.error(-1, 2104, "Market data farm connection is OK:usfarm")
 
     assert app.connected_event.is_set()
+
+
+def test_put_strikes_are_selected_nearest_otm_first() -> None:
+    strikes = [Decimal("185"), Decimal("190"), Decimal("195"), Decimal("200"), Decimal("205")]
+
+    selected = _select_relevant_strikes(strikes=strikes, spot=Decimal("202"), right="P")
+
+    assert selected == [
+        Decimal("200"),
+        Decimal("195"),
+        Decimal("190"),
+        Decimal("185"),
+    ]
+
+
+def test_option_definitions_are_deduped_by_contract_identity() -> None:
+    definitions = [
+        _OptionDefinition("AAPL", "CBOE", "AAPL", "100", "20260501", Decimal("245"), "P"),
+        _OptionDefinition("AAPL", "SMART", "AAPL", "100", "20260501", Decimal("245"), "P"),
+        _OptionDefinition("AAPL", "AMEX", "AAPL", "100", "20260501", Decimal("245"), "P"),
+        _OptionDefinition("AAPL", "SMART", "AAPL", "100", "20260501", Decimal("240"), "P"),
+    ]
+
+    deduped = _dedupe_option_definitions(definitions)
+
+    assert len(deduped) == 2
+    assert deduped[0].exchange == "SMART"
+    assert [definition.strike for definition in deduped] == [
+        Decimal("245"),
+        Decimal("240"),
+    ]

@@ -41,8 +41,21 @@ def write_scan_outputs(
         or row["suggested_contracts"] == 0
     ]
 
+    target_summary = {
+        "target_weekly_premium": float(sizing_result.target_weekly_premium),
+        "premium_captured": float(sizing_result.premium_captured),
+        "target_achieved_pct": sizing_result.target_achieved_pct,
+        "target_met": sizing_result.target_met,
+        "unused_cash": float(sizing_result.unused_cash),
+    }
+
+    ranked_output = {
+        "target_summary": target_summary,
+        "trades": ranked_rows,
+    }
+
     paths.ranked_json.write_text(
-        json.dumps(ranked_rows, indent=2),
+        json.dumps(ranked_output, indent=2),
         encoding="utf-8",
     )
     paths.rejected_json.write_text(
@@ -72,15 +85,28 @@ def summarize_console(
     ]
     lines = [
         f"{broker_name} scan complete.",
+        f"Portfolio value: ${_portfolio_value(sizing_result):,.2f}",
+        f"Free cash: ${_free_cash(sizing_result):,.2f}",
         f"Ranked trades: {len(sizing_result.decisions)}",
         f"Suggested positions: {len(allocated)}",
         f"Rejected/skipped trades: {len(rejected)}",
         f"Total allocated capital: ${sizing_result.total_allocated:,.2f}",
+        # Target summary
+        f"Weekly premium target: ${sizing_result.target_weekly_premium:,.2f}",
+        f"Premium captured: ${sizing_result.premium_captured:,.2f}",
+        f"Target achieved: {sizing_result.target_achieved_pct:.1f}%"
+        + (" ✓" if sizing_result.target_met else ""),
+        f"Unused cash: ${sizing_result.unused_cash:,.2f}",
         f"JSON: {paths.ranked_json}",
         f"CSV: {paths.ranked_csv}",
         f"Rejected JSON: {paths.rejected_json}",
         f"Decision log: {paths.decision_log}",
     ]
+
+    if not sizing_result.target_met and sizing_result.target_weekly_premium > 0:
+        lines.append(
+            "Target not met: insufficient high-quality candidates to reach weekly premium goal."
+        )
 
     if allocated:
         lines.append("Top suggestions:")
@@ -113,6 +139,8 @@ def _decision_to_row(decision: PositionSizingDecision) -> dict[str, Any]:
         "implied_volatility": _json_value(option.implied_volatility),
         "open_interest": option.open_interest,
         "volume": option.volume,
+        "portfolio_value": _json_value(_portfolio_value(decision)),
+        "free_cash": _json_value(_free_cash(decision)),
         "probability_of_profit": _note_float(candidate.notes, "modeled_pop"),
         "annualized_return": _note_float(candidate.notes, "annualized_return"),
         "break_even": _note_float(candidate.notes, "break_even"),
@@ -131,6 +159,9 @@ def _decision_to_row(decision: PositionSizingDecision) -> dict[str, Any]:
         "skipped": decision.skipped,
         "skip_reason": decision.skip_reason,
         "rationale": trade.rationale,
+        # Target fields
+        "target_eligible": decision.target_eligible,
+        "target_skip_reason": decision.target_skip_reason,
     }
 
 
@@ -150,6 +181,29 @@ def _json_value(value: Any) -> Any:
         return float(value)
 
     return value
+
+
+def _portfolio_value(value: PositionSizingResult | PositionSizingDecision) -> Decimal:
+    snapshot = _snapshot(value)
+    if snapshot is None:
+        return Decimal("0")
+
+    return snapshot.net_liquidation
+
+
+def _free_cash(value: PositionSizingResult | PositionSizingDecision) -> Decimal:
+    snapshot = _snapshot(value)
+    if snapshot is None:
+        return Decimal("0")
+
+    return snapshot.free_cash
+
+
+def _snapshot(value: PositionSizingResult | PositionSizingDecision):
+    if isinstance(value, PositionSizingResult):
+        return value.portfolio_snapshot
+
+    return value.portfolio_snapshot
 
 
 def _note_float(notes: list[str], key: str) -> float | None:

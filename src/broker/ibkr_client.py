@@ -12,6 +12,7 @@ from typing import Any
 from broker.base import Broker
 from broker.contracts import BrokerConnection, OptionChainRequest, expiry_datetime, same_week_friday
 from data.models import OptionQuote, UnderlyingQuote
+from portfolio.models import PortfolioSnapshot
 
 
 LOGGER = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ TICK_DELAYED_LAST_OPTION_COMPUTATION = 82
 TICK_DELAYED_MODEL_OPTION_COMPUTATION = 83
 
 GENERIC_TICKS_OPTION_VOLUME_OPEN_INTEREST = "100,101"
+ACCOUNT_SUMMARY_TAGS = "NetLiquidation,AvailableFunds,TotalCashValue,BuyingPower"
 
 
 @dataclass
@@ -202,6 +204,48 @@ class IbkrClient(Broker):
 
         return quotes
 
+    def fetch_portfolio_snapshot(self) -> PortfolioSnapshot:
+        self._ensure_connected()
+        req_id = self._app.next_req_id()
+        event = self._app.register_account_summary_request(req_id)
+        self._app.reqAccountSummary(req_id, "All", ACCOUNT_SUMMARY_TAGS)
+        if not event.wait(self.config.connect_timeout):
+            self._app.cancelAccountSummary(req_id)
+            raise TimeoutError("Timed out fetching IBKR account summary.")
+
+        self._app.cancelAccountSummary(req_id)
+        summary = self._app.account_summary.pop(req_id, {})
+        account_id = summary.get("account_id")
+        currency = summary.get("currency", "USD")
+        net_liquidation = _decimal_or_zero(summary.get("NetLiquidation"))
+        free_cash = (
+            _decimal_or_none(summary.get("AvailableFunds"))
+            or _decimal_or_none(summary.get("TotalCashValue"))
+            or _decimal_or_none(summary.get("BuyingPower"))
+            or Decimal("0")
+        )
+        warnings: list[str] = []
+        if net_liquidation <= 0:
+            warnings.append("missing_or_zero_net_liquidation")
+        if free_cash <= 0:
+            warnings.append("missing_or_zero_free_cash")
+
+        self.logger.info(
+            "IBKR portfolio snapshot account=%s net_liquidation=%s free_cash=%s currency=%s.",
+            account_id,
+            net_liquidation,
+            free_cash,
+            currency,
+        )
+        return PortfolioSnapshot(
+            account_id=account_id,
+            net_liquidation=net_liquidation,
+            free_cash=free_cash,
+            currency=currency,
+            data_source="ibkr",
+            warnings=warnings,
+        )
+
     def fetch_option_chain(self, request: OptionChainRequest) -> list[OptionQuote]:
         self._ensure_connected()
         underlying = self._qualify_underlying(request.underlying_symbol)
@@ -321,7 +365,11 @@ class IbkrClient(Broker):
             if target_expiry not in expirations:
                 continue
 
-            strikes = sorted(Decimal(str(strike)) for strike in param["strikes"])
+            strikes = _select_relevant_strikes(
+                strikes=[Decimal(str(strike)) for strike in param["strikes"]],
+                spot=spot,
+                right=right,
+            )
             for strike in strikes:
                 if request.min_strike is not None and strike < request.min_strike:
                     continue
@@ -346,6 +394,7 @@ class IbkrClient(Broker):
                     )
                 )
 
+        definitions = _dedupe_option_definitions(definitions)
         limited = definitions[: self.config.max_option_contracts]
         self.logger.info(
             "IBKR option chain %s: selected %s/%s contracts for expiry %s.",
@@ -537,6 +586,8 @@ class _IbkrApp:
         self.option_param_events: dict[int, threading.Event] = {}
         self.option_params: dict[int, list[dict[str, Any]]] = {}
         self.market_data: dict[int, IbkrMarketDataSnapshot] = {}
+        self.account_summary_events: dict[int, threading.Event] = {}
+        self.account_summary: dict[int, dict[str, str]] = {}
 
     def next_req_id(self) -> int:
         with self._lock:
@@ -554,6 +605,12 @@ class _IbkrApp:
         event = threading.Event()
         self.option_param_events[req_id] = event
         self.option_params[req_id] = []
+        return event
+
+    def register_account_summary_request(self, req_id: int) -> threading.Event:
+        event = threading.Event()
+        self.account_summary_events[req_id] = event
+        self.account_summary[req_id] = {}
         return event
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802
@@ -576,6 +633,25 @@ class _IbkrApp:
     def managedAccounts(self, accountsList: str) -> None:  # noqa: N802
         self.connected_event.set()
         self.logger.info("IBKR managed accounts received.")
+
+    def accountSummary(  # noqa: N802
+        self,
+        reqId: int,
+        account: str,
+        tag: str,
+        value: str,
+        currency: str,
+    ) -> None:
+        summary = self.account_summary.setdefault(reqId, {})
+        summary["account_id"] = account
+        if currency:
+            summary["currency"] = currency
+        summary[tag] = value
+
+    def accountSummaryEnd(self, reqId: int) -> None:  # noqa: N802
+        event = self.account_summary_events.get(reqId)
+        if event:
+            event.set()
 
     def contractDetails(self, reqId: int, contractDetails: Any) -> None:  # noqa: N802
         self.contract_details.setdefault(reqId, []).append(contractDetails)
@@ -722,8 +798,70 @@ def _midpoint(bid: Decimal | None, ask: Decimal | None) -> Decimal:
     raise ValueError("Cannot compute midpoint without bid or ask.")
 
 
+def _decimal_or_none(value: str | None) -> Decimal | None:
+    if value in {None, ""}:
+        return None
+
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _decimal_or_zero(value: str | None) -> Decimal:
+    return _decimal_or_none(value) or Decimal("0")
+
+
 def _has_all(snapshot: IbkrMarketDataSnapshot, fields: list[str]) -> bool:
     return all(getattr(snapshot, field) is not None for field in fields)
+
+
+def _select_relevant_strikes(
+    *,
+    strikes: list[Decimal],
+    spot: Decimal | None,
+    right: str,
+) -> list[Decimal]:
+    if spot is None:
+        return sorted(strikes)
+
+    if right == "P":
+        otm_strikes = [strike for strike in strikes if strike < spot]
+        return sorted(otm_strikes or strikes, reverse=True)
+
+    otm_strikes = [strike for strike in strikes if strike > spot]
+    return sorted(otm_strikes or strikes)
+
+
+def _dedupe_option_definitions(
+    definitions: list[_OptionDefinition],
+) -> list[_OptionDefinition]:
+    deduped: dict[tuple[str, str, Decimal, str], _OptionDefinition] = {}
+    for definition in definitions:
+        key = (
+            definition.symbol,
+            definition.expiration,
+            definition.strike,
+            definition.right,
+        )
+        existing = deduped.get(key)
+        if existing is None or _prefer_definition(definition, existing):
+            deduped[key] = definition
+
+    return list(deduped.values())
+
+
+def _prefer_definition(
+    candidate: _OptionDefinition,
+    existing: _OptionDefinition,
+) -> bool:
+    if candidate.exchange == "SMART" and existing.exchange != "SMART":
+        return True
+
+    if candidate.exchange != "SMART" and existing.exchange == "SMART":
+        return False
+
+    return candidate.trading_class < existing.trading_class
 
 
 def _strike_near_spot(
