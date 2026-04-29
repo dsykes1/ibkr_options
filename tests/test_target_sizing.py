@@ -108,7 +108,7 @@ def _ranked_trade(
 # ---------------------------------------------------------------------------
 
 def test_premium_captured_accumulates_from_allocated_eligible_trades() -> None:
-    """Premium captured should equal sum of mid-premium * 100 for allocated trades."""
+    """Premium captured should equal sum of executable bid premium * 100."""
     config = _scan_config(account_size=20_000, max_positions=3)
     trades = [
         _ranked_trade(symbol="AAPL", rank=1, strike="50", bid="1.00", ask="1.20", modeled_pop=0.97),
@@ -116,8 +116,8 @@ def test_premium_captured_accumulates_from_allocated_eligible_trades() -> None:
     ]
     result = size_ranked_trades(trades, config)
 
-    # mid premium: (1.00+1.20)/2 = 1.10 * 100 = 110; (0.80+1.00)/2 = 0.90 * 100 = 90
-    expected = Decimal("110") + Decimal("90")
+    # Conservative bid-side premium: 1.00*100 + 0.80*100
+    expected = Decimal("100") + Decimal("80")
     assert result.premium_captured == expected
 
 

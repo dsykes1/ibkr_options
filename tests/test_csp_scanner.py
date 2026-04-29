@@ -112,3 +112,79 @@ def test_run_mock_scan_can_target_specific_expiration(tmp_path) -> None:
         trade.candidate.option.expiration_date.date()
         for trade in result.ranked_trades
     } == {NEXT_FRIDAY}
+
+
+def test_scan_rejects_zero_bid_options_as_untradeable(tmp_path) -> None:
+    settings = load_settings()
+    symbol, chain = next(iter(MOCK_OPTION_CHAINS.items()))
+    zero_bid_option = chain[0].model_copy(update={"bid": 0})
+    adjusted_chain = [zero_bid_option, *chain[1:]]
+    adjusted_chains = {**MOCK_OPTION_CHAINS, symbol: adjusted_chain}
+    broker = MockBroker(
+        underlying_quotes=MOCK_UNDERLYING_QUOTES,
+        option_chains=adjusted_chains,
+    )
+
+    result = run_mock_scan(settings, broker=broker, output_dir=tmp_path)
+
+    zero_bid_trades = [
+        trade
+        for trade in result.ranked_trades
+        if trade.candidate.option.symbol == zero_bid_option.symbol
+    ]
+    assert zero_bid_trades
+    assert all(
+        trade.eligibility_status == EligibilityStatus.REJECTED
+        for trade in zero_bid_trades
+    )
+    assert all(
+        RiskFlag.DATA_QUALITY_WARNING in trade.candidate.risk_flags
+        for trade in zero_bid_trades
+    )
+
+
+def test_capital_efficient_requested_contracts_scale_with_open_interest(tmp_path) -> None:
+    settings = load_settings().model_copy(
+        update={
+            "scanner": load_settings().scanner.model_copy(
+                update={"ranking_mode": "capital_efficient"}
+            )
+        }
+    )
+
+    result = run_mock_scan(settings, output_dir=tmp_path)
+
+    aapl_190 = next(
+        trade
+        for trade in result.ranked_trades
+        if trade.candidate.option.symbol == "AAPL 2026-05-01 190P"
+    )
+    assert aapl_190.candidate.option.open_interest == 6_750
+    assert aapl_190.candidate.contracts == 67
+
+
+def test_capital_efficient_falls_back_to_fixed_cap_without_open_interest_pct(tmp_path) -> None:
+    base_settings = load_settings()
+    capital_efficient = base_settings.scanner.ranking_modes["capital_efficient"].model_copy(
+        update={
+            "max_contracts_per_trade": 7,
+            "open_interest_contract_limit_pct": None,
+        }
+    )
+    settings = base_settings.model_copy(
+        update={
+            "scanner": base_settings.scanner.model_copy(
+                update={
+                    "ranking_mode": "capital_efficient",
+                    "ranking_modes": {
+                        **base_settings.scanner.ranking_modes,
+                        "capital_efficient": capital_efficient,
+                    },
+                }
+            )
+        }
+    )
+
+    result = run_mock_scan(settings, output_dir=tmp_path)
+
+    assert any(trade.candidate.contracts == 7 for trade in result.ranked_trades)

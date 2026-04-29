@@ -33,7 +33,7 @@ scanner:
   ranking_mode: ultra_safe
   portfolio_targets:
     weekly_return_target_pct: 0.5
-    min_pop: 0.95
+    min_pop: 0.85
     allow_partial_target: true
     reject_if_target_requires_low_quality_trades: true
   universe_discovery:
@@ -72,4 +72,5 @@ scanner:
       min_annualized_return_pct: 12
       max_delta: 0.35
       max_contracts_per_trade: 2
+      open_interest_contract_limit_pct: 1.0
       prefer_lower_assignment_risk: false

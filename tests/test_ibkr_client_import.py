@@ -3,10 +3,13 @@ from decimal import Decimal
 
 from broker.ibkr_client import (
     IBKR_MARKET_DATA_TYPES,
+    IbkrClient,
     IbkrClientConfig,
+    IbkrMarketDataSnapshot,
     _OptionDefinition,
     _IbkrApp,
     _dedupe_option_definitions,
+    _display_unavailable_fields,
     _load_ibapi,
     _select_relevant_strikes,
 )
@@ -76,3 +79,30 @@ def test_option_definitions_are_deduped_by_contract_identity() -> None:
         Decimal("245"),
         Decimal("240"),
     ]
+
+
+def test_normalize_option_quote_rejects_missing_bid_ask_even_with_model_price() -> None:
+    client = IbkrClient(
+        IbkrClientConfig(host="127.0.0.1", port=7497, client_id=1),
+        logger=logging.getLogger(__name__),
+    )
+    definition = _OptionDefinition("AAPL", "SMART", "AAPL", "100", "20260501", Decimal("245"), "P")
+    snapshot = IbkrMarketDataSnapshot(
+        ask=Decimal("1.10"),
+        last=Decimal("1.05"),
+        model_price=Decimal("1.00"),
+        implied_volatility=Decimal("0.25"),
+        delta=Decimal("-0.20"),
+        market_data_type="live",
+        unavailable_fields=["bid", "option_volume"],
+    )
+
+    quote = client._normalize_option_quote(definition, snapshot)
+
+    assert quote is None
+
+
+def test_display_unavailable_fields_omits_option_volume_when_other_fields_missing() -> None:
+    assert _display_unavailable_fields(["bid", "option_volume"]) == ["bid"]
+    assert _display_unavailable_fields(["bid", "ask", "option_volume"]) == ["bid", "ask"]
+    assert _display_unavailable_fields(["option_volume"]) == ["option_volume"]

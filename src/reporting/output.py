@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from configuration import ScanConfig
 from portfolio.sizing import PositionSizingDecision, PositionSizingResult
 from strategy.models import EligibilityStatus, RankedTrade
 
@@ -22,6 +23,7 @@ class ReportPaths:
 def write_scan_outputs(
     sizing_result: PositionSizingResult,
     decision_log_path: Path,
+    scan_config: ScanConfig,
     output_dir: Path = Path("logs"),
 ) -> ReportPaths:
     """Write ranked trade CSV/JSON, rejected JSON, and decision log path metadata."""
@@ -52,6 +54,7 @@ def write_scan_outputs(
     }
 
     ranked_output = {
+        "scan_parameters": _scan_parameters(scan_config),
         "target_summary": target_summary,
         "trades": ranked_rows,
     }
@@ -174,6 +177,16 @@ def _decision_to_row(decision: PositionSizingDecision) -> dict[str, Any]:
     }
 
 
+def _scan_parameters(scan_config: ScanConfig) -> dict[str, Any]:
+    mode_config = scan_config.ranking_modes[scan_config.ranking_mode]
+    return {
+        "ranking_mode": scan_config.ranking_mode,
+        "target_weekly_return_pct": scan_config.portfolio_targets.weekly_return_target_pct,
+        "target_min_pop": scan_config.portfolio_targets.min_pop,
+        "max_delta": mode_config.max_delta,
+    }
+
+
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         path.write_text("", encoding="utf-8")
@@ -235,7 +248,7 @@ def _note_float(notes: list[str], key: str) -> float | None:
 
 def _market_premium_per_contract(decision: PositionSizingDecision) -> Decimal:
     option = decision.ranked_trade.candidate.option
-    return ((option.bid + option.ask) / Decimal("2")) * Decimal("100")
+    return option.bid * Decimal("100")
 
 
 def _market_premium_total(decision: PositionSizingDecision) -> Decimal:

@@ -27,6 +27,19 @@ def test_scan_report_includes_target_summary_fields(tmp_path) -> None:
     assert summary["target_achieved_pct"] >= 0.0
 
 
+def test_scan_report_includes_scan_parameters(tmp_path) -> None:
+    settings = load_settings()
+    result = run_mock_scan(settings, output_dir=tmp_path)
+
+    ranked_output = json.loads(result.report_paths.ranked_json.read_text(encoding="utf-8"))
+    scan_parameters = ranked_output["scan_parameters"]
+
+    assert scan_parameters["ranking_mode"] == settings.scanner.ranking_mode
+    assert scan_parameters["target_weekly_return_pct"] == settings.scanner.portfolio_targets.weekly_return_target_pct
+    assert scan_parameters["target_min_pop"] == settings.scanner.portfolio_targets.min_pop
+    assert scan_parameters["max_delta"] == settings.scanner.ranking_modes[settings.scanner.ranking_mode].max_delta
+
+
 def test_scan_report_trades_include_target_eligible_field(tmp_path) -> None:
     """Each trade row in ranked_trades.json should include target_eligible."""
     settings = load_settings()

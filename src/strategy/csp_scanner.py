@@ -127,6 +127,7 @@ def run_mock_scan(
     report_paths = write_scan_outputs(
         sizing_result=sizing_result,
         decision_log_path=log_path,
+        scan_config=effective_scan_config,
         output_dir=output_dir,
     )
     console_output = summarize_console(
@@ -159,10 +160,10 @@ def _evaluate_option(
     as_of: date,
     decision_logger: DecisionLogger,
 ) -> RankerInput:
-    mid_premium = (option.bid + option.ask) / Decimal("2")
+    executable_premium = option.bid
     collateral = option.strike * Decimal("100")
     days_to_expiry = max((option.expiration_date.date() - as_of).days, 1)
-    break_even_price = break_even(float(option.strike), float(mid_premium))
+    break_even_price = break_even(float(option.strike), float(executable_premium))
     modeled_pop = (
         model_pop_above_break_even(
             underlying_price=float(underlying.last_price),
@@ -178,7 +179,7 @@ def _evaluate_option(
     )
     probability_of_profit = modeled_pop or fallback_pop
     annualized = annualized_return(
-        premium=float(mid_premium),
+        premium=float(executable_premium),
         collateral=float(option.strike),
         days_to_expiry=days_to_expiry,
     )
@@ -209,10 +210,14 @@ def _evaluate_option(
         _config_filter_flags(
             option=option,
             annualized=annualized,
-            mid_premium=mid_premium,
+            premium_per_share=executable_premium,
             settings=settings,
         )
     )
+    if not _has_tradeable_bid_ask(option):
+        risk_flags.append(RiskFlag.DATA_QUALITY_WARNING)
+        probability_of_profit = None
+        annualized = None
     if option.data_quality_warnings or underlying.data_quality_warnings:
         risk_flags.append(RiskFlag.DATA_QUALITY_WARNING)
     if _has_disallowed_market_data_type(option, settings) or _has_disallowed_market_data_type(
@@ -225,15 +230,19 @@ def _evaluate_option(
         risk_flags.append(RiskFlag.DATA_QUALITY_WARNING)
         probability_of_profit = None
     risk_flags = list(dict.fromkeys(risk_flags))
+    mode_name = settings.scanner.ranking_mode
+    mode_config = settings.scanner.ranking_modes[mode_name]
 
     candidate = CandidateTrade(
         underlying=underlying,
         option=option,
-        contracts=settings.scanner.ranking_modes[
-            settings.scanner.ranking_mode
-        ].max_contracts_per_trade,
+        contracts=_requested_contracts(
+            option=option,
+            mode_name=mode_name,
+            mode_config=mode_config,
+        ),
         cash_required=collateral,
-        estimated_premium=mid_premium * Decimal("100"),
+        estimated_premium=executable_premium * Decimal("100"),
         risk_flags=risk_flags,
         notes=[
             f"days_to_expiry={days_to_expiry}",
@@ -245,7 +254,7 @@ def _evaluate_option(
     )
     decision_logger.record(
         f"Evaluated {option.symbol}: POP={_format_optional_float(probability_of_profit)} "
-        f"return={annualized:.3f} liquidity={option_liquidity_score:.1f} "
+        f"return={_format_optional_float(annualized)} liquidity={option_liquidity_score:.1f} "
         f"flags={[flag.value for flag in risk_flags]}."
     )
 
@@ -254,7 +263,7 @@ def _evaluate_option(
         probability_of_profit=probability_of_profit,
         annualized_return=annualized,
         liquidity_score=option_liquidity_score,
-        premium=float(mid_premium),
+        premium=float(executable_premium),
     )
 
 
@@ -262,13 +271,13 @@ def _config_filter_flags(
     *,
     option: OptionQuote,
     annualized: float | None,
-    mid_premium: Decimal,
+    premium_per_share: Decimal,
     settings: Settings,
 ) -> list[RiskFlag]:
     flags: list[RiskFlag] = []
     mode_config = settings.scanner.ranking_modes[settings.scanner.ranking_mode]
 
-    premium_dollars = mid_premium * Decimal("100")
+    premium_dollars = premium_per_share * Decimal("100")
     if mode_config.min_premium is not None and premium_dollars < Decimal(
         str(mode_config.min_premium)
     ):
@@ -296,6 +305,9 @@ def _missing_required_option_fields(option: OptionQuote, settings: Settings) -> 
     market_data = settings.market_data
     required_fields: list[object] = []
 
+    if market_data.require_bid_ask and not _has_tradeable_bid_ask(option):
+        return True
+
     if market_data.require_bid_ask:
         required_fields.extend([option.bid, option.ask])
     if market_data.require_greeks:
@@ -308,6 +320,30 @@ def _missing_required_option_fields(option: OptionQuote, settings: Settings) -> 
         required_fields.append(option.volume)
 
     return any(value is None for value in required_fields)
+
+
+def _has_tradeable_bid_ask(option: OptionQuote) -> bool:
+    return option.bid > 0 and option.ask > 0 and option.ask >= option.bid
+
+
+def _requested_contracts(
+    *,
+    option: OptionQuote,
+    mode_name: str,
+    mode_config,
+) -> int:
+    if mode_name != "capital_efficient":
+        return mode_config.max_contracts_per_trade
+
+    open_interest_limit_pct = mode_config.open_interest_contract_limit_pct
+    if open_interest_limit_pct is None:
+        return mode_config.max_contracts_per_trade
+
+    open_interest = max(option.open_interest or 0, 0)
+    if open_interest <= 0:
+        return mode_config.max_contracts_per_trade
+
+    return max(int(open_interest * (open_interest_limit_pct / 100)), 1)
 
 
 def _has_disallowed_market_data_type(

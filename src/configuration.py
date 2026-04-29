@@ -69,6 +69,11 @@ class RankingModeConfig(BaseModel):
     min_annualized_return_pct: float | None = Field(default=None, ge=0)
     max_delta: float | None = None
     max_contracts_per_trade: int = Field(default=1, ge=1)
+    open_interest_contract_limit_pct: float | None = Field(
+        default=None,
+        gt=0,
+        le=100,
+    )
     prefer_lower_assignment_risk: bool = True
 
 

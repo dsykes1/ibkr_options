@@ -154,8 +154,12 @@ def size_ranked_trades(
                 positions_allocated += 1
                 # Accrue premium toward target
                 if target_eligible:
-                    mid_premium = _mid_premium(ranked_trade)
-                    premium_captured += mid_premium * CONTRACT_MULTIPLIER * suggested_contracts
+                    marketable_premium = _marketable_premium(ranked_trade)
+                    premium_captured += (
+                        marketable_premium
+                        * CONTRACT_MULTIPLIER
+                        * suggested_contracts
+                    )
 
         decisions.append(
             PositionSizingDecision(
@@ -201,10 +205,10 @@ def _collateral_per_contract(ranked_trade: RankedTrade) -> Decimal:
     return strike * CONTRACT_MULTIPLIER
 
 
-def _mid_premium(ranked_trade: RankedTrade) -> Decimal:
-    """Return the mid-market premium for a single option contract (per-share)."""
+def _marketable_premium(ranked_trade: RankedTrade) -> Decimal:
+    """Return conservative premium per share based on executable bid."""
     option = ranked_trade.candidate.option
-    return (option.bid + option.ask) / Decimal("2")
+    return option.bid
 
 
 def _premium_vs_risked_pct(ranked_trade: RankedTrade) -> float | None:
@@ -213,7 +217,7 @@ def _premium_vs_risked_pct(ranked_trade: RankedTrade) -> float | None:
     if strike <= 0:
         return None
 
-    return float((_mid_premium(ranked_trade) / strike) * Decimal("100"))
+    return float((_marketable_premium(ranked_trade) / strike) * Decimal("100"))
 
 
 def _pop_from_notes(candidate) -> float | None:

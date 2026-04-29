@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -48,6 +49,10 @@ TICK_DELAYED_MODEL_OPTION_COMPUTATION = 83
 
 GENERIC_TICKS_OPTION_VOLUME_OPEN_INTEREST = "100,101"
 ACCOUNT_SUMMARY_TAGS = "NetLiquidation,AvailableFunds,TotalCashValue,BuyingPower"
+IBKR_MARKET_DATA_LIMIT_RE = re.compile(
+    r"requested data for\s+(\d+)\s+instruments simultaneously.*limit of\s+(\d+)\s+lines",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -59,6 +64,7 @@ class IbkrClientConfig:
     market_data_timeout: float = 6
     max_concurrent_market_data_lines: int = 95
     account_market_data_line_limit: int = 100
+    market_data_line_reserve: int = 45
     max_option_contracts: int = 30
     chain_strike_window_pct: float = 0.15
     market_data_type: str = "live"
@@ -76,6 +82,9 @@ class IbkrClientConfig:
             ),
             account_market_data_line_limit=int(
                 os.getenv("IBKR_ACCOUNT_MARKET_DATA_LINES", "100")
+            ),
+            market_data_line_reserve=int(
+                os.getenv("IBKR_MARKET_DATA_LINE_RESERVE", "45")
             ),
             max_option_contracts=int(os.getenv("IBKR_MAX_OPTION_CONTRACTS", "30")),
             chain_strike_window_pct=float(
@@ -217,13 +226,12 @@ class IbkrClient(Broker):
     ) -> dict[str, IbkrMarketDataSnapshot]:
         """Request underlying snapshots concurrently to reduce scan latency."""
         snapshots_by_symbol: dict[str, IbkrMarketDataSnapshot] = {}
-        # Never exceed the account limit (minus a small buffer for async cancellation timing).
-        safe_limit = max(1, self.config.account_market_data_line_limit - 8)
-        chunk_size = max(1, min(self.config.max_concurrent_market_data_lines, safe_limit))
+        chunk_size = self._effective_market_data_chunk_size()
         essential_fields = ["bid", "ask", "last"]
 
         for symbol_chunk in _chunked(symbols, chunk_size):
             active_requests: dict[int, str] = {}
+            self._app.current_market_data_batch_size = len(symbol_chunk)
             for symbol in symbol_chunk:
                 req_id = self._app.next_req_id()
                 active_requests[req_id] = symbol.upper()
@@ -254,6 +262,7 @@ class IbkrClient(Broker):
                     field for field in essential_fields if getattr(snapshot, field) is None
                 ]
                 snapshots_by_symbol[symbol] = snapshot
+            self._app.current_market_data_batch_size = 0
 
         return snapshots_by_symbol
 
@@ -526,12 +535,11 @@ class IbkrClient(Broker):
         # and should not stall processing of the entire chunk.
         wait_fields = ["bid", "ask", "implied_volatility", "delta"]
         results: list[tuple[_OptionDefinition, IbkrMarketDataSnapshot]] = []
-        # Never exceed the account limit (minus a small buffer for async cancellation timing).
-        safe_limit = max(1, self.config.account_market_data_line_limit - 8)
-        chunk_size = max(1, min(self.config.max_concurrent_market_data_lines, safe_limit))
+        chunk_size = self._effective_market_data_chunk_size()
 
         for definition_chunk in _chunked(definitions, chunk_size):
             active_requests: dict[int, _OptionDefinition] = {}
+            self._app.current_market_data_batch_size = len(definition_chunk)
 
             for definition in definition_chunk:
                 req_id = self._app.next_req_id()
@@ -571,8 +579,43 @@ class IbkrClient(Broker):
                 ]
                 self._log_data_quality(f"option {definition.symbol}", snapshot)
                 results.append((definition, snapshot))
+            self._app.current_market_data_batch_size = 0
 
         return results
+
+    def _effective_market_data_chunk_size(self) -> int:
+        """Compute a safe concurrent market-data request size.
+
+        Uses configured limits plus runtime feedback from IBKR over-limit errors.
+        This protects scans when other tools/sessions are consuming market-data lines.
+        """
+        requested = max(1, self.config.max_concurrent_market_data_lines)
+        limit = max(1, self.config.account_market_data_line_limit)
+        reserve = max(0, self.config.market_data_line_reserve)
+        over_limit_by = 0
+        in_use_lines_hint = 0
+
+        if self._app is not None:
+            if self._app.detected_market_data_line_limit is not None:
+                limit = min(limit, self._app.detected_market_data_line_limit)
+            if self._app.last_over_limit_by is not None:
+                over_limit_by = self._app.last_over_limit_by
+            in_use_lines_hint = self._app.in_use_market_data_lines_hint
+
+        # If IBKR reported an over-limit recently, shrink immediately by that amount
+        # (plus one extra line) to avoid repeated limit hits on the next chunk.
+        safe_limit = max(1, limit - reserve - in_use_lines_hint - over_limit_by - 1)
+        chunk_size = max(1, min(requested, safe_limit))
+        self.logger.debug(
+            "IBKR market-data chunk sizing requested=%s limit=%s reserve=%s in_use=%s over=%s effective=%s.",
+            requested,
+            limit,
+            reserve,
+            in_use_lines_hint,
+            over_limit_by,
+            chunk_size,
+        )
+        return chunk_size
 
     def _request_market_data(
         self,
@@ -615,44 +658,23 @@ class IbkrClient(Broker):
         snapshot: IbkrMarketDataSnapshot,
     ) -> OptionQuote | None:
         if snapshot.bid is None or snapshot.ask is None:
-            # Try to synthesize a quote from the IBKR model price or last trade.
-            # Model price (tickType 13/83) is available even for illiquid options
-            # with no active market, making it the best fallback.
-            fallback = snapshot.model_price or snapshot.last
-            if fallback is None:
-                self.logger.debug(
-                    "Rejecting %s %s %s%s: missing bid/ask with no model/last fallback: %s.",
-                    definition.symbol,
-                    definition.expiration,
-                    definition.strike,
-                    definition.right,
-                    snapshot.unavailable_fields,
-                )
-                return None
-            fallback_source = "model" if snapshot.model_price is not None else "last"
-            self.logger.info(
-                "Synthesizing bid/ask from %s price %s for %s %s %s%s.",
-                fallback_source,
-                fallback,
+            self.logger.debug(
+                "Rejecting %s %s %s%s: missing actual bid/ask from IBKR: %s.",
                 definition.symbol,
                 definition.expiration,
                 definition.strike,
                 definition.right,
+                _display_unavailable_fields(snapshot.unavailable_fields),
             )
-            bid = snapshot.bid if snapshot.bid is not None else fallback
-            ask = snapshot.ask if snapshot.ask is not None else fallback
-        else:
-            bid = snapshot.bid
-            ask = snapshot.ask
+            return None
 
         data_quality_warnings = _data_quality_warnings(snapshot)
-        if snapshot.bid is None or snapshot.ask is None:
-            fallback_source = "model" if snapshot.model_price is not None else "last"
-            data_quality_warnings.append(f"synthetic_bid_ask_from_{fallback_source}")
         if snapshot.unavailable_fields:
-            data_quality_warnings.append(
-                "missing_fields:" + ",".join(snapshot.unavailable_fields)
-            )
+            displayed_fields = _display_unavailable_fields(snapshot.unavailable_fields)
+            if displayed_fields:
+                data_quality_warnings.append(
+                    "missing_fields:" + ",".join(displayed_fields)
+                )
 
         return OptionQuote(
             symbol=(
@@ -665,8 +687,8 @@ class IbkrClient(Broker):
             ),
             strike=definition.strike,
             option_type="put" if definition.right == "P" else "call",
-            bid=bid,
-            ask=ask,
+            bid=snapshot.bid,
+            ask=snapshot.ask,
             last_price=snapshot.last,
             volume=snapshot.option_volume or snapshot.volume,
             open_interest=snapshot.open_interest,
@@ -685,27 +707,28 @@ class IbkrClient(Broker):
                 description,
                 data_type,
             )
-        if snapshot.unavailable_fields:
-            unavailable = set(snapshot.unavailable_fields)
+        displayed_fields = _display_unavailable_fields(snapshot.unavailable_fields)
+        if displayed_fields:
+            unavailable = set(displayed_fields)
             # Option volume is frequently sparse intraday; keep it as debug noise.
             if unavailable == {"option_volume"}:
                 self.logger.debug(
                     "IBKR %s unavailable fields: %s.",
                     description,
-                    ", ".join(snapshot.unavailable_fields),
+                    ", ".join(displayed_fields),
                 )
             # Missing bid/ask is materially actionable for scan eligibility.
             elif {"bid", "ask"}.intersection(unavailable):
                 self.logger.warning(
                     "IBKR %s unavailable fields: %s.",
                     description,
-                    ", ".join(snapshot.unavailable_fields),
+                    ", ".join(displayed_fields),
                 )
             else:
                 self.logger.info(
                     "IBKR %s unavailable fields: %s.",
                     description,
-                    ", ".join(snapshot.unavailable_fields),
+                    ", ".join(displayed_fields),
                 )
         self.logger.info(
             "IBKR %s fields: bid=%s ask=%s last=%s iv=%s delta=%s oi=%s opt_volume=%s data_type=%s.",
@@ -745,6 +768,10 @@ class _IbkrApp:
         self.account_summary_events: dict[int, threading.Event] = {}
         self.account_summary: dict[int, dict[str, str]] = {}
         self._error_counts: dict[tuple[int, str], int] = {}
+        self.detected_market_data_line_limit: int | None = None
+        self.last_over_limit_by: int | None = None
+        self.current_market_data_batch_size: int = 0
+        self.in_use_market_data_lines_hint: int = 0
 
     def next_req_id(self) -> int:
         with self._lock:
@@ -782,6 +809,27 @@ class _IbkrApp:
                 reqId,
                 errorCode,
                 errorString,
+            )
+            return
+
+        over_limit = _parse_market_data_over_limit(errorString)
+        if over_limit is not None:
+            requested, limit = over_limit
+            self.detected_market_data_line_limit = limit
+            self.last_over_limit_by = max(1, requested - limit)
+            if self.current_market_data_batch_size > 0:
+                inferred_in_use = max(0, requested - self.current_market_data_batch_size)
+                self.in_use_market_data_lines_hint = max(
+                    self.in_use_market_data_lines_hint,
+                    inferred_in_use,
+                )
+            self.logger.warning(
+                "IBKR market-data line cap hit: requested=%s limit=%s over=%s in_use_hint=%s. "
+                "Reducing future chunk sizes automatically.",
+                requested,
+                limit,
+                self.last_over_limit_by,
+                self.in_use_market_data_lines_hint,
             )
             return
 
@@ -957,6 +1005,16 @@ def _load_ibapi() -> tuple[type, type, type]:
     return EClient, EWrapper, Contract
 
 
+def _parse_market_data_over_limit(error_string: str) -> tuple[int, int] | None:
+    """Return (requested_lines, account_limit) when IBKR reports over-limit text."""
+    match = IBKR_MARKET_DATA_LIMIT_RE.search(error_string or "")
+    if not match:
+        return None
+    requested = int(match.group(1))
+    limit = int(match.group(2))
+    return requested, limit
+
+
 def _stock_contract(symbol: str) -> Any:
     _EClient, _EWrapper, Contract = _load_ibapi()
     contract = Contract()
@@ -1125,6 +1183,13 @@ def _data_quality_warnings(snapshot: IbkrMarketDataSnapshot) -> list[str]:
     elif snapshot.market_data_type is None:
         warnings.append("market_data_type:unknown")
     return warnings
+
+
+def _display_unavailable_fields(fields: list[str]) -> list[str]:
+    unique_fields = list(dict.fromkeys(fields))
+    if len(unique_fields) > 1 and "option_volume" in unique_fields:
+        return [field for field in unique_fields if field != "option_volume"]
+    return unique_fields
 
 
 def _chunked(items: list[Any], size: int) -> list[list[Any]]:

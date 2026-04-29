@@ -18,6 +18,15 @@ DEFAULT_JSON_PATH = Path("logs/ranked_trades.json")
 DEFAULT_CSV_PATH = Path("logs/ranked_trades.csv")
 DEFAULT_SETTINGS_PATH = Path("config/settings.yaml")
 MIN_PREMIUM_VS_RISKED_PCT_DISPLAY = 0.5
+DEFAULT_TARGET_WEEKLY_RETURN_PCT = 0.5
+DEFAULT_TARGET_MIN_POP = 0.95
+DEFAULT_MAX_DELTA = 0.25
+
+SCAN_RANKING_MODE_KEY = "scan_ranking_mode"
+SCAN_TARGET_WEEKLY_RETURN_KEY = "scan_target_weekly_return_pct"
+SCAN_TARGET_MIN_POP_KEY = "scan_target_min_pop"
+SCAN_MAX_DELTA_KEY = "scan_max_delta"
+LAST_SCAN_CONTROLS_KEY = "last_scan_controls"
 
 
 DISPLAY_COLUMNS = [
@@ -45,7 +54,7 @@ def main() -> None:
 
     source_path = _source_selector()
     settings_path = _scan_controls()
-    data, target_summary = _load_results(source_path)
+    data, target_summary, scan_parameters = _load_results(source_path)
     if data.empty:
         last_console = st.session_state.get("last_scan_console_output")
         last_broker = st.session_state.get("last_scan_broker")
@@ -68,7 +77,7 @@ def main() -> None:
     sorted_data = _sort_controls(filtered)
 
     _target_cards(target_summary)
-    _summary_cards(sorted_data, settings_path, target_summary)
+    _summary_cards(sorted_data, settings_path, target_summary, scan_parameters)
     _ranked_table(sorted_data)
     _score_breakdown_chart(sorted_data)
 
@@ -93,10 +102,72 @@ def _source_selector() -> Path:
 
 
 def _scan_controls() -> Path:
+    settings_preview = None
+    ranking_mode_options = ["ultra_safe", "capital_efficient"]
+
     with st.sidebar:
         st.header("Scan")
         settings_path = Path(
             st.text_input("Settings", value=str(DEFAULT_SETTINGS_PATH))
+        )
+        try:
+            settings_preview = load_settings(settings_path)
+            ranking_mode_options = _enabled_ranking_modes(settings_preview)
+        except Exception:
+            settings_preview = None
+
+        default_controls = _default_scan_controls(
+            settings_preview,
+            ranking_mode_options=ranking_mode_options,
+        )
+        reset_controls = st.button("Reset to config defaults", use_container_width=True)
+        if reset_controls:
+            _set_scan_control_state(default_controls)
+
+        _ensure_scan_control_state(default_controls)
+
+        selected_ranking_mode = st.selectbox(
+            "Ranking Mode",
+            options=ranking_mode_options,
+            index=ranking_mode_options.index(st.session_state[SCAN_RANKING_MODE_KEY])
+            if st.session_state[SCAN_RANKING_MODE_KEY] in ranking_mode_options
+            else 0,
+            key=SCAN_RANKING_MODE_KEY,
+        )
+        if settings_preview is not None:
+            mode_default_delta = _default_max_delta_for_mode(
+                settings_preview,
+                selected_ranking_mode,
+            )
+            if st.session_state.get(SCAN_MAX_DELTA_KEY) is None:
+                st.session_state[SCAN_MAX_DELTA_KEY] = mode_default_delta
+
+        target_weekly_return_pct = st.number_input(
+            "Target premium vs strike (%)",
+            min_value=0.0,
+            max_value=10.0,
+            step=0.05,
+            key=SCAN_TARGET_WEEKLY_RETURN_KEY,
+            help=(
+                "Minimum premium as a percent of strike/cash risked for a trade to count "
+                "toward the weekly target."
+            ),
+        )
+        target_min_pop = st.slider(
+            "Target minimum POP",
+            min_value=0.0,
+            max_value=1.0,
+            step=0.01,
+            key=SCAN_TARGET_MIN_POP_KEY,
+            help="Minimum probability of profit for a trade to count toward the weekly target.",
+        )
+        max_delta = st.slider(
+            "Max delta",
+            min_value=0.01,
+            max_value=1.0,
+            step=0.01,
+            key=SCAN_MAX_DELTA_KEY,
+            help="Maximum absolute short-put delta allowed during candidate evaluation.",
         )
         broker_name = st.selectbox("Broker", options=["ibkr", "mock"], index=0)
         expiration_date = st.date_input(
@@ -111,6 +182,13 @@ def _scan_controls() -> Path:
     try:
         with st.spinner(f"Running {broker_name} scan..."):
             settings = load_settings(settings_path)
+            settings = _apply_scan_overrides(
+                settings=settings,
+                ranking_mode=selected_ranking_mode,
+                target_weekly_return_pct=target_weekly_return_pct,
+                target_min_pop=target_min_pop,
+                max_delta=max_delta,
+            )
             broker = (
                 IbkrClient(
                     IbkrClientConfig(
@@ -139,6 +217,12 @@ def _scan_controls() -> Path:
     st.session_state["last_scan_broker"] = broker_name
     st.session_state["last_scan_trade_count"] = len(result.sizing_result.decisions)
     st.session_state["results_file"] = str(result.report_paths.ranked_json)
+    st.session_state[LAST_SCAN_CONTROLS_KEY] = {
+        "ranking_mode": selected_ranking_mode,
+        "target_weekly_return_pct": target_weekly_return_pct,
+        "target_min_pop": target_min_pop,
+        "max_delta": max_delta,
+    }
 
     st.success("Scan complete.")
     st.code(result.console_output)
@@ -146,25 +230,154 @@ def _scan_controls() -> Path:
     return settings_path
 
 
-def _load_results(path: Path) -> tuple[pd.DataFrame, dict]:
+def _apply_scan_overrides(
+    *,
+    settings,
+    ranking_mode: str,
+    target_weekly_return_pct: float,
+    target_min_pop: float,
+    max_delta: float,
+):
+    selected_mode = settings.scanner.ranking_modes[ranking_mode]
+    return settings.model_copy(
+        update={
+            "scanner": settings.scanner.model_copy(
+                update={
+                    "ranking_mode": ranking_mode,
+                    "ranking_modes": {
+                        **settings.scanner.ranking_modes,
+                        ranking_mode: selected_mode.model_copy(
+                            update={"max_delta": max_delta}
+                        ),
+                    },
+                    "portfolio_targets": settings.scanner.portfolio_targets.model_copy(
+                        update={
+                            "weekly_return_target_pct": target_weekly_return_pct,
+                            "min_pop": target_min_pop,
+                        }
+                    ),
+                }
+            )
+        }
+    )
+
+
+def _default_scan_controls(settings_preview, *, ranking_mode_options: list[str]) -> dict[str, float | str]:
+    if settings_preview is None:
+        return {
+            "ranking_mode": ranking_mode_options[0],
+            "target_weekly_return_pct": DEFAULT_TARGET_WEEKLY_RETURN_PCT,
+            "target_min_pop": DEFAULT_TARGET_MIN_POP,
+            "max_delta": DEFAULT_MAX_DELTA,
+        }
+
+    ranking_mode = settings_preview.scanner.ranking_mode
+    if ranking_mode not in ranking_mode_options:
+        ranking_mode = ranking_mode_options[0]
+
+    return {
+        "ranking_mode": ranking_mode,
+        "target_weekly_return_pct": float(
+            settings_preview.scanner.portfolio_targets.weekly_return_target_pct
+        ),
+        "target_min_pop": float(settings_preview.scanner.portfolio_targets.min_pop),
+        "max_delta": _default_max_delta_for_mode(settings_preview, ranking_mode),
+    }
+
+
+def _default_max_delta_for_mode(settings_preview, ranking_mode: str) -> float:
+    mode = settings_preview.scanner.ranking_modes.get(ranking_mode)
+    if mode is None or mode.max_delta is None:
+        return DEFAULT_MAX_DELTA
+    return float(mode.max_delta)
+
+
+def _ensure_scan_control_state(default_controls: dict[str, float | str]) -> None:
+    st.session_state.setdefault(SCAN_RANKING_MODE_KEY, default_controls["ranking_mode"])
+    st.session_state.setdefault(
+        SCAN_TARGET_WEEKLY_RETURN_KEY,
+        default_controls["target_weekly_return_pct"],
+    )
+    st.session_state.setdefault(SCAN_TARGET_MIN_POP_KEY, default_controls["target_min_pop"])
+    st.session_state.setdefault(SCAN_MAX_DELTA_KEY, default_controls["max_delta"])
+
+
+def _set_scan_control_state(default_controls: dict[str, float | str]) -> None:
+    st.session_state[SCAN_RANKING_MODE_KEY] = default_controls["ranking_mode"]
+    st.session_state[SCAN_TARGET_WEEKLY_RETURN_KEY] = default_controls["target_weekly_return_pct"]
+    st.session_state[SCAN_TARGET_MIN_POP_KEY] = default_controls["target_min_pop"]
+    st.session_state[SCAN_MAX_DELTA_KEY] = default_controls["max_delta"]
+
+
+def _active_scan_controls(
+    settings_path: Path,
+    scan_parameters: dict,
+) -> dict[str, float | str]:
+    controls = st.session_state.get(LAST_SCAN_CONTROLS_KEY)
+    if controls is not None:
+        return controls
+
+    if scan_parameters:
+        return {
+            "ranking_mode": scan_parameters.get("ranking_mode", "ultra_safe"),
+            "target_weekly_return_pct": scan_parameters.get(
+                "target_weekly_return_pct",
+                DEFAULT_TARGET_WEEKLY_RETURN_PCT,
+            ),
+            "target_min_pop": scan_parameters.get(
+                "target_min_pop",
+                DEFAULT_TARGET_MIN_POP,
+            ),
+            "max_delta": scan_parameters.get("max_delta", DEFAULT_MAX_DELTA),
+        }
+
+    try:
+        settings = load_settings(settings_path)
+    except Exception:
+        return {
+            "ranking_mode": "ultra_safe",
+            "target_weekly_return_pct": DEFAULT_TARGET_WEEKLY_RETURN_PCT,
+            "target_min_pop": DEFAULT_TARGET_MIN_POP,
+            "max_delta": DEFAULT_MAX_DELTA,
+        }
+
+    return _default_scan_controls(
+        settings,
+        ranking_mode_options=_enabled_ranking_modes(settings),
+    )
+
+
+def _enabled_ranking_modes(settings) -> list[str]:
+    enabled_modes = [
+        name
+        for name, mode_config in settings.scanner.ranking_modes.items()
+        if mode_config.enabled
+    ]
+    return enabled_modes or [settings.scanner.ranking_mode]
+
+
+def _load_results(path: Path) -> tuple[pd.DataFrame, dict, dict]:
     if not path.exists():
-        return pd.DataFrame(), {}
+        return pd.DataFrame(), {}, {}
 
     if path.suffix.lower() == ".csv":
         data = pd.read_csv(path)
         target_summary: dict = {}
+        scan_parameters: dict = {}
     else:
         import json as _json
         raw_dict = _json.loads(path.read_text(encoding="utf-8"))
         if isinstance(raw_dict, dict) and "trades" in raw_dict:
             data = pd.DataFrame(raw_dict["trades"])
             target_summary = raw_dict.get("target_summary", {})
+            scan_parameters = raw_dict.get("scan_parameters", {})
         else:
             data = pd.DataFrame(raw_dict)
             target_summary = {}
+            scan_parameters = {}
 
     if data.empty:
-        return data, target_summary
+        return data, target_summary, scan_parameters
 
     data = data.copy()
     data["risk_flags"] = data["risk_flags"].apply(_parse_flags)
@@ -191,7 +404,7 @@ def _load_results(path: Path) -> tuple[pd.DataFrame, dict]:
     if "target_eligible" not in data:
         data["target_eligible"] = True
 
-    return data, target_summary
+    return data, target_summary, scan_parameters
 
 
 def _filters(data: pd.DataFrame) -> pd.DataFrame:
@@ -292,14 +505,20 @@ def _target_cards(target_summary: dict) -> None:
     cols[3].metric("Unused Cash", f"${unused_cash:,.2f}")
 
 
-def _summary_cards(data: pd.DataFrame, settings_path: Path, target_summary: dict) -> None:
+def _summary_cards(
+    data: pd.DataFrame,
+    settings_path: Path,
+    target_summary: dict,
+    scan_parameters: dict,
+) -> None:
     portfolio_value, free_cash = _load_portfolio_values(data, settings_path, target_summary)
     recommended = data[data["suggested_contracts"].fillna(0) > 0]
-    avg_pop = data["probability_of_profit"].mean()
-    avg_return = data["annualized_return"].mean()
+    avg_pop = recommended["probability_of_profit"].mean()
+    avg_return = recommended["annualized_return"].mean()
     total_capital = recommended["capital_required"].sum()
     unused_cash = max(free_cash - total_capital, 0)
     capital_used_pct = total_capital / free_cash if free_cash else 0
+    active_controls = _active_scan_controls(settings_path, scan_parameters)
 
     cols = st.columns(4)
     cols[0].metric("Portfolio Value", f"${portfolio_value:,.0f}")
@@ -311,6 +530,14 @@ def _summary_cards(data: pd.DataFrame, settings_path: Path, target_summary: dict
     cols[0].metric("Recommended Trades", f"{len(recommended)}")
     cols[1].metric("Avg POP", _format_pct(avg_pop))
     cols[2].metric("Avg Annualized Return", _format_pct(avg_return))
+
+    st.caption(
+        "Active scan thresholds: "
+        f"mode={active_controls['ranking_mode']}, "
+        f"premium vs strike >= {float(active_controls['target_weekly_return_pct']):.2f}%, "
+        f"POP >= {float(active_controls['target_min_pop']):.0%}, "
+        f"max delta <= {float(active_controls['max_delta']):.2f}."
+    )
 
 
 def _ranked_table(data: pd.DataFrame) -> None:
