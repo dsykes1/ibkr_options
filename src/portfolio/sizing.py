@@ -58,7 +58,9 @@ def size_ranked_trades(
     suggested contracts.
 
     Portfolio-target tracking:
-        A trade is *target eligible* when its POP meets portfolio_targets.min_pop.
+        A trade is *target eligible* when:
+            - its POP meets portfolio_targets.min_pop, and
+            - premium/strike meets portfolio_targets.weekly_return_target_pct.
         If reject_if_target_requires_low_quality_trades is True, ineligible trades
         are skipped from allocation rather than just annotated.
         premium_captured accumulates mid-premium * 100 * contracts for eligible
@@ -97,12 +99,20 @@ def size_ranked_trades(
             else Decimal("0")
         )
 
-        # Determine target eligibility from pop stored in candidate notes
+        # Determine target eligibility from POP and premium-vs-risked-capital.
         trade_pop = _pop_from_notes(candidate)
-        target_eligible = trade_pop is None or trade_pop >= portfolio_targets.min_pop
+        premium_vs_risked_pct = _premium_vs_risked_pct(ranked_trade)
+        pop_ok = trade_pop is None or trade_pop >= portfolio_targets.min_pop
+        premium_ok = (
+            premium_vs_risked_pct is not None
+            and premium_vs_risked_pct >= portfolio_targets.weekly_return_target_pct
+        )
+        target_eligible = pop_ok and premium_ok
         target_skip_reason: str | None = None
-        if not target_eligible:
+        if not pop_ok:
             target_skip_reason = "pop_below_target_min_pop"
+        elif not premium_ok:
+            target_skip_reason = "premium_below_weekly_target_pct"
 
         skip_reason = _initial_skip_reason(
             ranked_trade=ranked_trade,
@@ -195,6 +205,15 @@ def _mid_premium(ranked_trade: RankedTrade) -> Decimal:
     """Return the mid-market premium for a single option contract (per-share)."""
     option = ranked_trade.candidate.option
     return (option.bid + option.ask) / Decimal("2")
+
+
+def _premium_vs_risked_pct(ranked_trade: RankedTrade) -> float | None:
+    """Return premium/strike percentage for one contract."""
+    strike = ranked_trade.candidate.option.strike
+    if strike <= 0:
+        return None
+
+    return float((_mid_premium(ranked_trade) / strike) * Decimal("100"))
 
 
 def _pop_from_notes(candidate) -> float | None:

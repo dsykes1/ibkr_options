@@ -1,8 +1,4 @@
-"""Universe discovery: build the list of symbols to scan from config and optional sources.
-
-Structure allows S&P 500 / Nasdaq-100 sources to be plugged in later;
-those stubs return empty lists for now.
-"""
+"""Universe discovery: build the list of symbols to scan from config and optional sources."""
 from __future__ import annotations
 
 from configuration import ScanConfig, UniverseDiscoveryConfig
@@ -26,6 +22,37 @@ KNOWN_LEVERAGED_ETFS: frozenset[str] = frozenset(
         # Leveraged volatility / commodity
         "UVXY", "SVXY", "UCO", "SCO", "BOIL", "KOLD",
     }
+)
+
+
+# Curated liquid names from S&P 500; maintained in-repo to avoid runtime web calls.
+SP500_LIQUID_UNIVERSE: tuple[str, ...] = (
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "BRK.B", "TSLA", "JPM", "V",
+    "UNH", "XOM", "MA", "LLY", "AVGO", "COST", "PG", "HD", "WMT", "MRK",
+    "ABBV", "PEP", "KO", "BAC", "ADBE", "CRM", "CVX", "AMD", "ACN", "MCD",
+    "CSCO", "NFLX", "TMO", "PFE", "ABT", "INTC", "DIS", "VZ", "CMCSA", "ORCL",
+    "QCOM", "NKE", "DHR", "TXN", "PM", "LIN", "WFC", "UPS", "RTX", "HON",
+    "SPGI", "BMY", "IBM", "LOW", "AMGN", "GS", "CAT", "SBUX", "INTU", "BLK",
+    "SYK", "AMAT", "DE", "GE", "BKNG", "T", "MDT", "LMT", "GILD", "AXP",
+    "ADP", "NOW", "ISRG", "PLD", "VRTX", "TJX", "SCHW", "CI", "MU", "MMC",
+    "CB", "REGN", "ELV", "SO", "DUK", "COP", "BDX", "ZTS", "PANW", "CME",
+    "ICE", "MO", "CL", "EOG", "EQIX", "AON", "NSC", "APD", "ITW", "ETN",
+    "MS", "CSX", "FDX", "MAR", "GM", "F", "PYPL", "USB", "PNC", "APTV",
+    "TGT", "EMR", "SHW", "MCK", "MPC", "AEP", "PSX", "CCI", "AFL", "ROP",
+)
+
+
+NASDAQ100_UNIVERSE: tuple[str, ...] = (
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "AVGO", "TSLA", "COST",
+    "NFLX", "AMD", "ADBE", "PEP", "CSCO", "TMUS", "INTC", "QCOM", "CMCSA", "TXN",
+    "AMGN", "INTU", "AMAT", "ISRG", "BKNG", "LRCX", "ADI", "GILD", "MU", "PANW",
+    "VRTX", "MELI", "CRWD", "SNPS", "KLAC", "CDNS", "ORLY", "ASML", "MDLZ", "MAR",
+    "ADP", "REGN", "ABNB", "CTAS", "SBUX", "CSX", "MNST", "CHTR", "NXPI", "MCHP",
+    "WDAY", "PAYX", "KDP", "ROST", "AEP", "PCAR", "MRVL", "EXC", "XEL", "ODFL",
+    "IDXX", "FTNT", "FAST", "EA", "VRSK", "BIIB", "TEAM", "LULU", "GEHC", "DLTR",
+    "BKR", "KHC", "DDOG", "DASH", "CTSH", "ANSS", "WBD", "ON", "ILMN", "ZS",
+    "SIRI", "GFS", "CDW", "FANG", "TTWO", "MDB", "CPRT", "ALGN", "CEG", "PYPL",
+    "HON", "DXCM", "MRNA", "SPLK", "WBA", "RIVN", "JD", "PDD", "BIDU", "NTES",
 )
 
 
@@ -98,7 +125,7 @@ def filter_by_volume(
 
 
 # ---------------------------------------------------------------------------
-# Source stubs — replace with real implementations when ready
+# Source lists
 # ---------------------------------------------------------------------------
 
 
@@ -115,20 +142,13 @@ def _etf_universe() -> list[str]:
 
 
 def _sp500_universe() -> list[str]:
-    """S&P 500 constituent symbols.
-
-    Stub: returns empty list. Plug in a data source (e.g., Wikipedia scrape,
-    broker screener, or static CSV) when ready.
-    """
-    return []
+    """Liquid S&P 500 symbol list bundled with the project."""
+    return list(SP500_LIQUID_UNIVERSE)
 
 
 def _nasdaq100_universe() -> list[str]:
-    """Nasdaq-100 constituent symbols.
-
-    Stub: returns empty list. Replace with a live feed when ready.
-    """
-    return []
+    """Nasdaq-100 symbol list bundled with the project."""
+    return list(NASDAQ100_UNIVERSE)
 
 
 def _normalize(symbols: list[str]) -> list[str]:

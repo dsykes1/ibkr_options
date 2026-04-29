@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import date
+from decimal import Decimal
 
 from broker.contracts import OptionChainRequest
 from data.models import OptionQuote, UnderlyingQuote
@@ -35,6 +36,24 @@ class Broker(ABC):
     @abstractmethod
     def fetch_option_chain(self, request: OptionChainRequest) -> list[OptionQuote]:
         """Return option chain entries for a single underlying request."""
+
+    def fetch_option_chains(
+        self,
+        requests: list[OptionChainRequest],
+        spots: dict[str, Decimal] | None = None,
+    ) -> dict[str, list[OptionQuote]]:
+        """Bulk fetch option chains for multiple underlyings.
+
+        Default implementation is a serial loop over fetch_option_chain.
+        Override (e.g. in IbkrClient) to parallelize setup round-trips and
+        run a single combined market-data batch across all symbols.
+        The optional ``spots`` mapping (symbol → last price) is forwarded to
+        broker implementations that can use it to skip a redundant quote fetch.
+        """
+        result: dict[str, list[OptionQuote]] = {}
+        for request in requests:
+            result[request.underlying_symbol.upper()] = self.fetch_option_chain(request)
+        return result
 
     @abstractmethod
     def filter_same_week_friday_expiry(

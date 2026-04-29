@@ -145,12 +145,18 @@ def test_filter_by_volume_keeps_symbol_not_in_quotes() -> None:
 
 
 def test_discovery_sp500_stub_returns_empty() -> None:
-    """S&P 500 stub should not yet contribute symbols."""
+    """S&P 500 source should contribute symbols."""
     from data.universe_discovery import _sp500_universe
-    assert _sp500_universe() == []
+    symbols = _sp500_universe()
+    assert symbols
+    assert "AAPL" in symbols
+    assert "MSFT" in symbols
 
 
 def test_discovery_nasdaq100_stub_returns_empty() -> None:
-    """Nasdaq-100 stub should not yet contribute symbols."""
+    """Nasdaq-100 source should contribute symbols."""
     from data.universe_discovery import _nasdaq100_universe
-    assert _nasdaq100_universe() == []
+    symbols = _nasdaq100_universe()
+    assert symbols
+    assert "AAPL" in symbols
+    assert "NVDA" in symbols

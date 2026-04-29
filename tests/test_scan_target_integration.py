@@ -20,6 +20,8 @@ def test_scan_report_includes_target_summary_fields(tmp_path) -> None:
     assert "target_achieved_pct" in summary
     assert "target_met" in summary
     assert "unused_cash" in summary
+    assert "portfolio_value" in summary
+    assert "free_cash" in summary
     assert isinstance(summary["target_weekly_premium"], (int, float))
     assert isinstance(summary["premium_captured"], (int, float))
     assert summary["target_achieved_pct"] >= 0.0
@@ -33,6 +35,8 @@ def test_scan_report_trades_include_target_eligible_field(tmp_path) -> None:
     ranked_output = json.loads(result.report_paths.ranked_json.read_text(encoding="utf-8"))
     for row in ranked_output["trades"]:
         assert "target_eligible" in row
+        assert "market_premium_total" in row
+        assert "premium_vs_cash_risked_pct" in row
 
 
 def test_scan_sizing_result_has_target_fields(tmp_path) -> None:

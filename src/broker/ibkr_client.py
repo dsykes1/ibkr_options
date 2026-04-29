@@ -57,6 +57,8 @@ class IbkrClientConfig:
     client_id: int
     connect_timeout: float = 10
     market_data_timeout: float = 6
+    max_concurrent_market_data_lines: int = 95
+    account_market_data_line_limit: int = 100
     max_option_contracts: int = 30
     chain_strike_window_pct: float = 0.15
     market_data_type: str = "live"
@@ -69,12 +71,19 @@ class IbkrClientConfig:
             client_id=int(os.getenv("IBKR_CLIENT_ID", "1")),
             connect_timeout=float(os.getenv("IBKR_CONNECT_TIMEOUT", "10")),
             market_data_timeout=float(os.getenv("IBKR_MARKET_DATA_TIMEOUT", "6")),
+            max_concurrent_market_data_lines=int(
+                os.getenv("IBKR_MAX_CONCURRENT_LINES", "95")
+            ),
+            account_market_data_line_limit=int(
+                os.getenv("IBKR_ACCOUNT_MARKET_DATA_LINES", "100")
+            ),
             max_option_contracts=int(os.getenv("IBKR_MAX_OPTION_CONTRACTS", "30")),
             chain_strike_window_pct=float(
                 os.getenv("IBKR_CHAIN_STRIKE_WINDOW_PCT", "0.15")
             ),
             market_data_type=os.getenv("IBKR_MARKET_DATA_TYPE", "live"),
         )
+
 
 
 @dataclass
@@ -87,6 +96,7 @@ class IbkrMarketDataSnapshot:
     open_interest: int | None = None
     implied_volatility: Decimal | None = None
     delta: Decimal | None = None
+    model_price: Decimal | None = None
     market_data_type: str | None = None
     unavailable_fields: list[str] = field(default_factory=list)
 
@@ -173,14 +183,11 @@ class IbkrClient(Broker):
     def fetch_underlying_quotes(self, symbols: list[str]) -> list[UnderlyingQuote]:
         self._ensure_connected()
         quotes: list[UnderlyingQuote] = []
+        snapshots = self._request_underlying_market_data_batch(symbols)
         for symbol in symbols:
-            contract = _stock_contract(symbol)
-            snapshot = self._request_market_data(
-                contract=contract,
-                generic_ticks="",
-                description=f"underlying {symbol.upper()}",
-                essential_fields=["bid", "ask", "last"],
-            )
+            snapshot = snapshots.get(symbol.upper())
+            if snapshot is None:
+                continue
             if snapshot.last is None and snapshot.bid is None and snapshot.ask is None:
                 self.logger.warning(
                     "IBKR underlying %s missing essential quote fields: %s",
@@ -203,6 +210,52 @@ class IbkrClient(Broker):
             quotes.append(quote)
 
         return quotes
+
+    def _request_underlying_market_data_batch(
+        self,
+        symbols: list[str],
+    ) -> dict[str, IbkrMarketDataSnapshot]:
+        """Request underlying snapshots concurrently to reduce scan latency."""
+        snapshots_by_symbol: dict[str, IbkrMarketDataSnapshot] = {}
+        # Never exceed the account limit (minus a small buffer for async cancellation timing).
+        safe_limit = max(1, self.config.account_market_data_line_limit - 8)
+        chunk_size = max(1, min(self.config.max_concurrent_market_data_lines, safe_limit))
+        essential_fields = ["bid", "ask", "last"]
+
+        for symbol_chunk in _chunked(symbols, chunk_size):
+            active_requests: dict[int, str] = {}
+            for symbol in symbol_chunk:
+                req_id = self._app.next_req_id()
+                active_requests[req_id] = symbol.upper()
+                self._app.market_data[req_id] = IbkrMarketDataSnapshot(
+                    market_data_type=self.config.market_data_type,
+                )
+                self._app.reqMktData(req_id, _stock_contract(symbol), "", False, False, [])
+
+            self.logger.info(
+                "IBKR reqMktData underlyings chunk: %s symbols (max concurrent lines=%s).",
+                len(active_requests),
+                chunk_size,
+            )
+
+            deadline = time.monotonic() + self.config.market_data_timeout
+            while time.monotonic() < deadline:
+                if all(
+                    _has_all(self._app.market_data[req_id], essential_fields)
+                    for req_id in active_requests
+                ):
+                    break
+                time.sleep(0.05)
+
+            for req_id, symbol in active_requests.items():
+                self._app.cancelMktData(req_id)
+                snapshot = self._app.market_data.pop(req_id, IbkrMarketDataSnapshot())
+                snapshot.unavailable_fields = [
+                    field for field in essential_fields if getattr(snapshot, field) is None
+                ]
+                snapshots_by_symbol[symbol] = snapshot
+
+        return snapshots_by_symbol
 
     def fetch_portfolio_snapshot(self) -> PortfolioSnapshot:
         self._ensure_connected()
@@ -247,20 +300,73 @@ class IbkrClient(Broker):
         )
 
     def fetch_option_chain(self, request: OptionChainRequest) -> list[OptionQuote]:
-        self._ensure_connected()
-        underlying = self._qualify_underlying(request.underlying_symbol)
-        underlying_quote = self.fetch_underlying_quotes([request.underlying_symbol])
-        spot = underlying_quote[0].last_price if underlying_quote else None
-        definitions = self._option_definitions(request, underlying, spot)
-        option_quotes: list[OptionQuote] = []
-        snapshots = self._request_option_market_data_batch(definitions)
+        """Fetch a single-symbol option chain. Delegates to fetch_option_chains."""
+        result = self.fetch_option_chains([request])
+        return result.get(request.underlying_symbol.upper(), [])
 
+    def fetch_option_chains(
+        self,
+        requests: list[OptionChainRequest],
+        spots: dict[str, Decimal] | None = None,
+    ) -> dict[str, list[OptionQuote]]:
+        """Fetch option chains for all symbols in parallel.
+
+        Phases:
+          1. Qualify all underlyings concurrently (reqContractDetails, no market-data lines).
+          2. Fetch spot prices in one underlying batch — skipped when caller provides ``spots``.
+          3. Fetch option parameters for all symbols concurrently (reqSecDefOptParams, no market-data lines).
+          4. Request market data for all resulting contracts in a single batch, chunked to
+             ``max_concurrent_market_data_lines`` to stay within the account limit.
+        """
+        self._ensure_connected()
+        if not requests:
+            return {}
+
+        symbols = [r.underlying_symbol.upper() for r in requests]
+
+        # Phase 1: qualify all underlyings in parallel — no market-data lines consumed.
+        underlying_contracts = self._qualify_underlyings_bulk(symbols)
+        qualified_requests = [
+            r for r in requests if r.underlying_symbol.upper() in underlying_contracts
+        ]
+
+        # Phase 2: spot prices for strike-window filtering.
+        # Reuse caller-provided quotes to avoid a redundant market-data round-trip.
+        if spots is None:
+            qualified_symbols = [r.underlying_symbol.upper() for r in qualified_requests]
+            spot_snapshots = self._request_underlying_market_data_batch(qualified_symbols)
+            spots = {}
+            for symbol, snapshot in spot_snapshots.items():
+                price = snapshot.last
+                if price is None and (snapshot.bid is not None or snapshot.ask is not None):
+                    price = _midpoint_safe(snapshot.bid, snapshot.ask)
+                spots[symbol] = price  # type: ignore[assignment]
+
+        # Phase 3: fetch option params for all qualified symbols concurrently.
+        all_definitions = self._option_definitions_bulk(
+            qualified_requests, underlying_contracts, spots
+        )
+
+        # Phase 4: single global market-data batch across every contract.
+        flat_definitions = [d for defs in all_definitions.values() for d in defs]
+        snapshots = self._request_option_market_data_batch(flat_definitions)
+
+        result: dict[str, list[OptionQuote]] = {r.underlying_symbol.upper(): [] for r in requests}
+        rejected = 0
         for definition, snapshot in snapshots:
             quote = self._normalize_option_quote(definition, snapshot)
             if quote is not None:
-                option_quotes.append(quote)
+                result[definition.symbol].append(quote)
+            else:
+                rejected += 1
 
-        return option_quotes
+        if rejected:
+            self.logger.info(
+                "IBKR bulk scan: rejected %s contracts with no usable price (no bid/ask, model, or last).",
+                rejected,
+            )
+
+        return result
 
     def fetch_option_bid_ask(self, option_contract: Any) -> tuple[Decimal | None, Decimal | None]:
         snapshot = self._request_market_data(
@@ -319,97 +425,95 @@ class IbkrClient(Broker):
             if option.expiration_date.date() == target_expiry
         ]
 
-    def _qualify_underlying(self, symbol: str) -> Any:
-        contract = _stock_contract(symbol)
-        req_id = self._app.next_req_id()
-        event = self._app.register_contract_details_request(req_id)
-        self._app.reqContractDetails(req_id, contract)
-        if not event.wait(self.config.connect_timeout):
-            raise TimeoutError(f"Timed out qualifying underlying {symbol.upper()}.")
+    def _qualify_underlyings_bulk(self, symbols: list[str]) -> dict[str, Any]:
+        """Fire reqContractDetails for all symbols simultaneously; return qualified contracts."""
+        events: dict[int, threading.Event] = {}
+        req_to_symbol: dict[int, str] = {}
+        for symbol in symbols:
+            req_id = self._app.next_req_id()
+            event = self._app.register_contract_details_request(req_id)
+            events[req_id] = event
+            req_to_symbol[req_id] = symbol.upper()
+            self._app.reqContractDetails(req_id, _stock_contract(symbol))
 
-        details = self._app.contract_details.pop(req_id, [])
-        if not details:
-            raise RuntimeError(f"IBKR returned no contract details for {symbol.upper()}.")
+        self.logger.info("IBKR qualifying %s underlyings in parallel.", len(symbols))
 
-        return details[0].contract
+        deadline = time.monotonic() + self.config.connect_timeout
+        for req_id, event in events.items():
+            remaining = max(0.1, deadline - time.monotonic())
+            event.wait(remaining)
 
-    def _option_definitions(
+        result: dict[str, Any] = {}
+        for req_id, symbol in req_to_symbol.items():
+            details = self._app.contract_details.pop(req_id, [])
+            if details:
+                result[symbol] = details[0].contract
+            else:
+                self.logger.warning("IBKR: no contract details for %s, skipping.", symbol)
+        return result
+
+    def _option_definitions_bulk(
         self,
-        request: OptionChainRequest,
-        underlying_contract: Any,
-        spot: Decimal | None,
-    ) -> list[_OptionDefinition]:
-        req_id = self._app.next_req_id()
-        event = self._app.register_option_params_request(req_id)
-        self._app.reqSecDefOptParams(
-            req_id,
-            request.underlying_symbol.upper(),
-            "",
-            "STK",
-            underlying_contract.conId,
-        )
-        if not event.wait(self.config.connect_timeout):
-            raise TimeoutError(
-                f"Timed out fetching option parameters for {request.underlying_symbol}."
-            )
-
-        params = self._app.option_params.pop(req_id, [])
-        target_expiry = (request.expiration_date or same_week_friday(request.as_of)).strftime(
-            "%Y%m%d"
-        )
-        right = "P" if request.option_right == "put" else "C"
-        definitions: list[_OptionDefinition] = []
-
-        for param in params:
-            expirations = set(param["expirations"])
-            if target_expiry not in expirations:
+        requests: list[OptionChainRequest],
+        underlying_contracts: dict[str, Any],
+        spots: dict[str, Decimal | None],
+    ) -> dict[str, list[_OptionDefinition]]:
+        """Fire reqSecDefOptParams for all symbols simultaneously; return definitions per symbol."""
+        events: dict[int, threading.Event] = {}
+        req_to_request: dict[int, OptionChainRequest] = {}
+        for request in requests:
+            symbol = request.underlying_symbol.upper()
+            underlying = underlying_contracts.get(symbol)
+            if underlying is None:
                 continue
+            req_id = self._app.next_req_id()
+            event = self._app.register_option_params_request(req_id)
+            events[req_id] = event
+            req_to_request[req_id] = request
+            self._app.reqSecDefOptParams(req_id, symbol, "", "STK", underlying.conId)
 
-            strikes = _select_relevant_strikes(
-                strikes=[Decimal(str(strike)) for strike in param["strikes"]],
-                spot=spot,
-                right=right,
-            )
-            for strike in strikes:
-                if request.min_strike is not None and strike < request.min_strike:
-                    continue
-                if request.max_strike is not None and strike > request.max_strike:
-                    continue
-                if not _strike_near_spot(
-                    strike,
-                    spot,
-                    self.config.chain_strike_window_pct,
-                ):
-                    continue
-
-                definitions.append(
-                    _OptionDefinition(
-                        symbol=request.underlying_symbol.upper(),
-                        exchange=param["exchange"] or "SMART",
-                        trading_class=param["trading_class"],
-                        multiplier=param["multiplier"] or "100",
-                        expiration=target_expiry,
-                        strike=strike,
-                        right=right,
-                    )
-                )
-
-        definitions = _dedupe_option_definitions(definitions)
-        limited = definitions[: self.config.max_option_contracts]
         self.logger.info(
-            "IBKR option chain %s: selected %s/%s contracts for expiry %s.",
-            request.underlying_symbol.upper(),
-            len(limited),
-            len(definitions),
-            target_expiry,
+            "IBKR fetching option params for %s symbols in parallel.", len(req_to_request)
         )
-        return limited
+
+        deadline = time.monotonic() + self.config.connect_timeout
+        for req_id, event in events.items():
+            remaining = max(0.1, deadline - time.monotonic())
+            event.wait(remaining)
+
+        result: dict[str, list[_OptionDefinition]] = {}
+        for req_id, request in req_to_request.items():
+            symbol = request.underlying_symbol.upper()
+            spot = spots.get(symbol)
+            params = self._app.option_params.pop(req_id, [])
+            target_expiry = (
+                request.expiration_date or same_week_friday(request.as_of)
+            ).strftime("%Y%m%d")
+            right = "P" if request.option_right == "put" else "C"
+            definitions = _definitions_from_params(
+                request=request,
+                params=params,
+                spot=spot,
+                target_expiry=target_expiry,
+                right=right,
+                max_contracts=self.config.max_option_contracts,
+                chain_strike_window_pct=self.config.chain_strike_window_pct,
+            )
+            result[symbol] = definitions
+            self.logger.info(
+                "IBKR option chain %s: selected %s contracts for expiry %s.",
+                symbol,
+                len(definitions),
+                target_expiry,
+            )
+        return result
 
     def _request_option_market_data_batch(
         self,
         definitions: list[_OptionDefinition],
     ) -> list[tuple[_OptionDefinition, IbkrMarketDataSnapshot]]:
-        essential_fields = [
+        # All fields we report on for data quality tracking.
+        tracked_fields = [
             "bid",
             "ask",
             "implied_volatility",
@@ -417,45 +521,56 @@ class IbkrClient(Broker):
             "open_interest",
             "option_volume",
         ]
-        active_requests: dict[int, _OptionDefinition] = {}
-
-        for definition in definitions:
-            req_id = self._app.next_req_id()
-            active_requests[req_id] = definition
-            self._app.market_data[req_id] = IbkrMarketDataSnapshot()
-            self._app.reqMktData(
-                req_id,
-                _option_contract(definition),
-                GENERIC_TICKS_OPTION_VOLUME_OPEN_INTEREST,
-                False,
-                False,
-                [],
-            )
-
-        if active_requests:
-            self.logger.info(
-                "IBKR batch reqMktData started for %s option contracts.",
-                len(active_requests),
-            )
-
-        deadline = time.monotonic() + self.config.market_data_timeout
-        while time.monotonic() < deadline:
-            if all(
-                _has_all(self._app.market_data[req_id], essential_fields)
-                for req_id in active_requests
-            ):
-                break
-            time.sleep(0.05)
-
+        # Fields we require before exiting the wait loop early.
+        # option_volume and open_interest are excluded: they rarely arrive intraday
+        # and should not stall processing of the entire chunk.
+        wait_fields = ["bid", "ask", "implied_volatility", "delta"]
         results: list[tuple[_OptionDefinition, IbkrMarketDataSnapshot]] = []
-        for req_id, definition in active_requests.items():
-            self._app.cancelMktData(req_id)
-            snapshot = self._app.market_data.pop(req_id, IbkrMarketDataSnapshot())
-            snapshot.unavailable_fields = [
-                field for field in essential_fields if getattr(snapshot, field) is None
-            ]
-            self._log_data_quality(f"option {definition.symbol}", snapshot)
-            results.append((definition, snapshot))
+        # Never exceed the account limit (minus a small buffer for async cancellation timing).
+        safe_limit = max(1, self.config.account_market_data_line_limit - 8)
+        chunk_size = max(1, min(self.config.max_concurrent_market_data_lines, safe_limit))
+
+        for definition_chunk in _chunked(definitions, chunk_size):
+            active_requests: dict[int, _OptionDefinition] = {}
+
+            for definition in definition_chunk:
+                req_id = self._app.next_req_id()
+                active_requests[req_id] = definition
+                self._app.market_data[req_id] = IbkrMarketDataSnapshot(
+                    market_data_type=self.config.market_data_type,
+                )
+                self._app.reqMktData(
+                    req_id,
+                    _option_contract(definition),
+                    GENERIC_TICKS_OPTION_VOLUME_OPEN_INTEREST,
+                    False,
+                    False,
+                    [],
+                )
+
+            self.logger.info(
+                "IBKR reqMktData option chunk: %s contracts (max concurrent lines=%s).",
+                len(active_requests),
+                chunk_size,
+            )
+
+            deadline = time.monotonic() + self.config.market_data_timeout
+            while time.monotonic() < deadline:
+                if all(
+                    _has_all(self._app.market_data[req_id], wait_fields)
+                    for req_id in active_requests
+                ):
+                    break
+                time.sleep(0.05)
+
+            for req_id, definition in active_requests.items():
+                self._app.cancelMktData(req_id)
+                snapshot = self._app.market_data.pop(req_id, IbkrMarketDataSnapshot())
+                snapshot.unavailable_fields = [
+                    field for field in tracked_fields if getattr(snapshot, field) is None
+                ]
+                self._log_data_quality(f"option {definition.symbol}", snapshot)
+                results.append((definition, snapshot))
 
         return results
 
@@ -468,7 +583,9 @@ class IbkrClient(Broker):
         essential_fields: list[str],
     ) -> IbkrMarketDataSnapshot:
         req_id = self._app.next_req_id()
-        self._app.market_data[req_id] = IbkrMarketDataSnapshot()
+        self._app.market_data[req_id] = IbkrMarketDataSnapshot(
+            market_data_type=self.config.market_data_type,
+        )
         self._app.reqMktData(req_id, contract, generic_ticks, False, False, [])
         self.logger.info(
             "IBKR reqMktData %s reqId=%s genericTicks=%s.",
@@ -498,17 +615,40 @@ class IbkrClient(Broker):
         snapshot: IbkrMarketDataSnapshot,
     ) -> OptionQuote | None:
         if snapshot.bid is None or snapshot.ask is None:
-            self.logger.warning(
-                "Rejecting %s %s %s%s: missing essential bid/ask fields: %s.",
+            # Try to synthesize a quote from the IBKR model price or last trade.
+            # Model price (tickType 13/83) is available even for illiquid options
+            # with no active market, making it the best fallback.
+            fallback = snapshot.model_price or snapshot.last
+            if fallback is None:
+                self.logger.debug(
+                    "Rejecting %s %s %s%s: missing bid/ask with no model/last fallback: %s.",
+                    definition.symbol,
+                    definition.expiration,
+                    definition.strike,
+                    definition.right,
+                    snapshot.unavailable_fields,
+                )
+                return None
+            fallback_source = "model" if snapshot.model_price is not None else "last"
+            self.logger.info(
+                "Synthesizing bid/ask from %s price %s for %s %s %s%s.",
+                fallback_source,
+                fallback,
                 definition.symbol,
                 definition.expiration,
                 definition.strike,
                 definition.right,
-                snapshot.unavailable_fields,
             )
-            return None
+            bid = snapshot.bid if snapshot.bid is not None else fallback
+            ask = snapshot.ask if snapshot.ask is not None else fallback
+        else:
+            bid = snapshot.bid
+            ask = snapshot.ask
 
         data_quality_warnings = _data_quality_warnings(snapshot)
+        if snapshot.bid is None or snapshot.ask is None:
+            fallback_source = "model" if snapshot.model_price is not None else "last"
+            data_quality_warnings.append(f"synthetic_bid_ask_from_{fallback_source}")
         if snapshot.unavailable_fields:
             data_quality_warnings.append(
                 "missing_fields:" + ",".join(snapshot.unavailable_fields)
@@ -525,8 +665,8 @@ class IbkrClient(Broker):
             ),
             strike=definition.strike,
             option_type="put" if definition.right == "P" else "call",
-            bid=snapshot.bid,
-            ask=snapshot.ask,
+            bid=bid,
+            ask=ask,
             last_price=snapshot.last,
             volume=snapshot.option_volume or snapshot.volume,
             open_interest=snapshot.open_interest,
@@ -546,11 +686,27 @@ class IbkrClient(Broker):
                 data_type,
             )
         if snapshot.unavailable_fields:
-            self.logger.warning(
-                "IBKR %s unavailable fields: %s.",
-                description,
-                ", ".join(snapshot.unavailable_fields),
-            )
+            unavailable = set(snapshot.unavailable_fields)
+            # Option volume is frequently sparse intraday; keep it as debug noise.
+            if unavailable == {"option_volume"}:
+                self.logger.debug(
+                    "IBKR %s unavailable fields: %s.",
+                    description,
+                    ", ".join(snapshot.unavailable_fields),
+                )
+            # Missing bid/ask is materially actionable for scan eligibility.
+            elif {"bid", "ask"}.intersection(unavailable):
+                self.logger.warning(
+                    "IBKR %s unavailable fields: %s.",
+                    description,
+                    ", ".join(snapshot.unavailable_fields),
+                )
+            else:
+                self.logger.info(
+                    "IBKR %s unavailable fields: %s.",
+                    description,
+                    ", ".join(snapshot.unavailable_fields),
+                )
         self.logger.info(
             "IBKR %s fields: bid=%s ask=%s last=%s iv=%s delta=%s oi=%s opt_volume=%s data_type=%s.",
             description,
@@ -588,6 +744,7 @@ class _IbkrApp:
         self.market_data: dict[int, IbkrMarketDataSnapshot] = {}
         self.account_summary_events: dict[int, threading.Event] = {}
         self.account_summary: dict[int, dict[str, str]] = {}
+        self._error_counts: dict[tuple[int, str], int] = {}
 
     def next_req_id(self) -> int:
         with self._lock:
@@ -626,6 +783,38 @@ class _IbkrApp:
                 errorCode,
                 errorString,
             )
+            return
+
+        # Benign cancellation race after cancelMktData for requests that already ended.
+        if errorCode == 300:
+            self.logger.debug(
+                "IBKR benign cancel race reqId=%s code=%s: %s",
+                reqId,
+                errorCode,
+                errorString,
+            )
+            return
+
+        # Frequent with broad universes / some strikes: keep signal without log flood.
+        if errorCode == 200:
+            key = (errorCode, errorString)
+            count = self._error_counts.get(key, 0) + 1
+            self._error_counts[key] = count
+            if count <= 3:
+                self.logger.info(
+                    "IBKR data gap reqId=%s code=%s (%s/%s): %s",
+                    reqId,
+                    errorCode,
+                    count,
+                    3,
+                    errorString,
+                )
+            elif count == 4:
+                self.logger.info(
+                    "IBKR code=%s '%s' repeated; further duplicates suppressed.",
+                    errorCode,
+                    errorString,
+                )
             return
 
         self.logger.warning("IBKR error reqId=%s code=%s: %s", reqId, errorCode, errorString)
@@ -747,6 +936,11 @@ class _IbkrApp:
             snapshot.implied_volatility = Decimal(str(impliedVol))
         if delta is not None and -2 < delta < 2:
             snapshot.delta = Decimal(str(delta))
+        # Capture model-computed option price as a fallback for missing bid/ask.
+        # IBKR provides this even for illiquid options with no active market quotes.
+        if tickType in {TICK_MODEL_OPTION_COMPUTATION, TICK_DELAYED_MODEL_OPTION_COMPUTATION}:
+            if optPrice is not None and optPrice > 0:
+                snapshot.model_price = Decimal(str(optPrice))
 
 
 def _load_ibapi() -> tuple[type, type, type]:
@@ -796,6 +990,54 @@ def _midpoint(bid: Decimal | None, ask: Decimal | None) -> Decimal:
     if ask is not None:
         return ask
     raise ValueError("Cannot compute midpoint without bid or ask.")
+
+
+def _midpoint_safe(bid: Decimal | None, ask: Decimal | None) -> Decimal | None:
+    """Like _midpoint but returns None instead of raising when both are absent."""
+    if bid is None and ask is None:
+        return None
+    return _midpoint(bid, ask)
+
+
+def _definitions_from_params(
+    *,
+    request: OptionChainRequest,
+    params: list[dict[str, Any]],
+    spot: Decimal | None,
+    target_expiry: str,
+    right: str,
+    max_contracts: int,
+    chain_strike_window_pct: float,
+) -> list[_OptionDefinition]:
+    """Pure function: build a capped, deduped list of option definitions from raw IBKR params."""
+    definitions: list[_OptionDefinition] = []
+    for param in params:
+        if target_expiry not in set(param["expirations"]):
+            continue
+        strikes = _select_relevant_strikes(
+            strikes=[Decimal(str(s)) for s in param["strikes"]],
+            spot=spot,
+            right=right,
+        )
+        for strike in strikes:
+            if request.min_strike is not None and strike < request.min_strike:
+                continue
+            if request.max_strike is not None and strike > request.max_strike:
+                continue
+            if not _strike_near_spot(strike, spot, chain_strike_window_pct):
+                continue
+            definitions.append(
+                _OptionDefinition(
+                    symbol=request.underlying_symbol.upper(),
+                    exchange=param["exchange"] or "SMART",
+                    trading_class=param["trading_class"],
+                    multiplier=param["multiplier"] or "100",
+                    expiration=target_expiry,
+                    strike=strike,
+                    right=right,
+                )
+            )
+    return _dedupe_option_definitions(definitions)[:max_contracts]
 
 
 def _decimal_or_none(value: str | None) -> Decimal | None:
@@ -883,3 +1125,10 @@ def _data_quality_warnings(snapshot: IbkrMarketDataSnapshot) -> list[str]:
     elif snapshot.market_data_type is None:
         warnings.append("market_data_type:unknown")
     return warnings
+
+
+def _chunked(items: list[Any], size: int) -> list[list[Any]]:
+    if size <= 0:
+        return [items]
+
+    return [items[index : index + size] for index in range(0, len(items), size)]

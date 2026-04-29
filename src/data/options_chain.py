@@ -6,7 +6,7 @@ from decimal import Decimal
 from broker.base import Broker
 from broker.contracts import OptionChainRequest, same_week_friday
 from configuration import ScanConfig
-from data.models import OptionQuote
+from data.models import OptionQuote, UnderlyingQuote
 
 
 def fetch_same_week_option_chains(
@@ -31,11 +31,15 @@ def fetch_option_chains_for_expiry(
     scan_config: ScanConfig,
     expiration_date: date,
     as_of: date | None = None,
+    underlying_quotes: dict[str, UnderlyingQuote] | None = None,
 ) -> dict[str, list[OptionQuote]]:
-    """Fetch option chains for a specific expiration date."""
-    chains: dict[str, list[OptionQuote]] = {}
-    for symbol in symbols:
-        request = OptionChainRequest(
+    """Fetch option chains for a specific expiration date.
+
+    Pass ``underlying_quotes`` (already fetched by the scanner) to let broker
+    implementations skip a redundant spot-price round-trip for strike filtering.
+    """
+    requests = [
+        OptionChainRequest(
             underlying_symbol=symbol,
             option_right=scan_config.option_type,
             min_strike=_to_decimal(scan_config.default_filters.min_underlying_price),
@@ -43,14 +47,27 @@ def fetch_option_chains_for_expiry(
             expiration_date=expiration_date,
             as_of=as_of,
         )
-        chain = broker.fetch_option_chain(request)
-        chains[symbol] = [
+        for symbol in symbols
+    ]
+
+    spots: dict[str, Decimal] | None = None
+    if underlying_quotes:
+        spots = {
+            symbol.upper(): quote.last_price
+            for symbol, quote in underlying_quotes.items()
+        }
+
+    chains = broker.fetch_option_chains(requests, spots)
+
+    # Ensure results are filtered to the exact expiration date.
+    return {
+        symbol: [
             option
             for option in chain
             if option.expiration_date.date() == expiration_date
         ]
-
-    return chains
+        for symbol, chain in chains.items()
+    }
 
 
 def _to_decimal(value: float | int | None) -> Decimal | None:

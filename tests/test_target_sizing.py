@@ -145,6 +145,7 @@ def test_target_not_met_returns_partial_when_allow_partial_target_true() -> None
         account_size=50_000,
         weekly_return_target_pct=10.0,
         allow_partial_target=True,
+        reject_if_target_requires_low_quality_trades=False,
     )
     snapshot = _portfolio_snapshot(net_liquidation=50_000)
     trades = [
@@ -201,6 +202,30 @@ def test_target_eligible_true_for_high_pop_trade() -> None:
 
     assert result.decisions[0].target_eligible is True
     assert result.decisions[0].target_skip_reason is None
+
+
+def test_trade_below_weekly_premium_vs_risk_target_is_skipped() -> None:
+    """Trades below weekly target premium % of strike should not be recommended."""
+    config = _scan_config(
+        account_size=20_000,
+        weekly_return_target_pct=0.5,
+        reject_if_target_requires_low_quality_trades=True,
+    )
+    # mid premium = 0.20, strike = 50 -> 0.4% (below 0.5% target)
+    low_premium_trade = _ranked_trade(
+        symbol="AAPL",
+        rank=1,
+        strike="50",
+        bid="0.18",
+        ask="0.22",
+        modeled_pop=0.98,
+    )
+
+    result = size_ranked_trades([low_premium_trade], config)
+
+    assert result.decisions[0].suggested_contracts == 0
+    assert result.decisions[0].target_eligible is False
+    assert result.decisions[0].target_skip_reason == "premium_below_weekly_target_pct"
 
 
 def test_unused_cash_reflects_unallocated_capital() -> None:

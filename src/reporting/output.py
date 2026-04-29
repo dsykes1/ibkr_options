@@ -47,6 +47,8 @@ def write_scan_outputs(
         "target_achieved_pct": sizing_result.target_achieved_pct,
         "target_met": sizing_result.target_met,
         "unused_cash": float(sizing_result.unused_cash),
+        "portfolio_value": float(_portfolio_value(sizing_result)),
+        "free_cash": float(_free_cash(sizing_result)),
     }
 
     ranked_output = {
@@ -156,6 +158,13 @@ def _decision_to_row(decision: PositionSizingDecision) -> dict[str, Any]:
         "max_allowed_contracts_by_ticker": decision.max_allowed_contracts_by_ticker,
         "suggested_contracts": decision.suggested_contracts,
         "capital_required": _json_value(decision.capital_required),
+        "market_premium_per_contract": _json_value(
+            _market_premium_per_contract(decision)
+        ),
+        "market_premium_total": _json_value(_market_premium_total(decision)),
+        "premium_vs_cash_risked_pct": _json_value(
+            _premium_vs_cash_risked_pct(decision)
+        ),
         "skipped": decision.skipped,
         "skip_reason": decision.skip_reason,
         "rationale": trade.rationale,
@@ -222,3 +231,19 @@ def _note_float(notes: list[str], key: str) -> float | None:
             return None
 
     return None
+
+
+def _market_premium_per_contract(decision: PositionSizingDecision) -> Decimal:
+    option = decision.ranked_trade.candidate.option
+    return ((option.bid + option.ask) / Decimal("2")) * Decimal("100")
+
+
+def _market_premium_total(decision: PositionSizingDecision) -> Decimal:
+    return _market_premium_per_contract(decision) * Decimal(decision.suggested_contracts)
+
+
+def _premium_vs_cash_risked_pct(decision: PositionSizingDecision) -> Decimal | None:
+    if decision.capital_required <= 0:
+        return None
+
+    return (_market_premium_total(decision) / decision.capital_required) * Decimal("100")

@@ -17,6 +17,7 @@ from strategy.csp_scanner import run_mock_scan
 DEFAULT_JSON_PATH = Path("logs/ranked_trades.json")
 DEFAULT_CSV_PATH = Path("logs/ranked_trades.csv")
 DEFAULT_SETTINGS_PATH = Path("config/settings.yaml")
+MIN_PREMIUM_VS_RISKED_PCT_DISPLAY = 0.5
 
 
 DISPLAY_COLUMNS = [
@@ -24,6 +25,8 @@ DISPLAY_COLUMNS = [
     "symbol",
     "expiration_date",
     "strike",
+    "market_premium_total",
+    "premium_vs_cash_risked_pct",
     "probability_of_profit",
     "annualized_return",
     "final_score",
@@ -65,20 +68,26 @@ def main() -> None:
     sorted_data = _sort_controls(filtered)
 
     _target_cards(target_summary)
-    _summary_cards(sorted_data, settings_path)
+    _summary_cards(sorted_data, settings_path, target_summary)
     _ranked_table(sorted_data)
     _score_breakdown_chart(sorted_data)
 
 
 def _source_selector() -> Path:
+    if "results_file" not in st.session_state:
+        st.session_state["results_file"] = ""
+
     available_paths = [
         path for path in [DEFAULT_JSON_PATH, DEFAULT_CSV_PATH] if path.exists()
     ]
     default_path = available_paths[0] if available_paths else DEFAULT_JSON_PATH
+    current_path = st.session_state["results_file"] or str(default_path)
 
     with st.sidebar:
         st.header("Results")
-        selected_path = st.text_input("File", value=str(default_path))
+        selected_path = st.text_input("File", value=current_path)
+
+    st.session_state["results_file"] = selected_path
 
     return Path(selected_path)
 
@@ -89,7 +98,7 @@ def _scan_controls() -> Path:
         settings_path = Path(
             st.text_input("Settings", value=str(DEFAULT_SETTINGS_PATH))
         )
-        broker_name = st.selectbox("Broker", options=["mock", "ibkr"], index=0)
+        broker_name = st.selectbox("Broker", options=["ibkr", "mock"], index=0)
         expiration_date = st.date_input(
             "Expiration",
             value=same_week_friday(date.today()),
@@ -129,6 +138,7 @@ def _scan_controls() -> Path:
     st.session_state["last_scan_console_output"] = result.console_output
     st.session_state["last_scan_broker"] = broker_name
     st.session_state["last_scan_trade_count"] = len(result.sizing_result.decisions)
+    st.session_state["results_file"] = str(result.report_paths.ranked_json)
 
     st.success("Scan complete.")
     st.code(result.console_output)
@@ -169,6 +179,9 @@ def _load_results(path: Path) -> tuple[pd.DataFrame, dict]:
         "return_score",
         "liquidity_score",
         "premium_score",
+        "market_premium_per_contract",
+        "market_premium_total",
+        "premium_vs_cash_risked_pct",
         "capital_required",
         "suggested_contracts",
     ]:
@@ -217,6 +230,13 @@ def _filters(data: pd.DataFrame) -> pd.DataFrame:
         & (data["probability_of_profit"].fillna(0) >= min_pop)
         & (data["annualized_return"].fillna(0) >= min_return)
     ]
+
+    # Hard display rule: hide trades that do not meet minimum premium vs risked cash.
+    if "premium_vs_cash_risked_pct" in filtered.columns:
+        filtered = filtered[
+            filtered["premium_vs_cash_risked_pct"].fillna(0)
+            >= MIN_PREMIUM_VS_RISKED_PCT_DISPLAY
+        ]
 
     if target_eligible_only and "target_eligible" in filtered.columns:
         filtered = filtered[filtered["target_eligible"].fillna(True)]
@@ -272,8 +292,8 @@ def _target_cards(target_summary: dict) -> None:
     cols[3].metric("Unused Cash", f"${unused_cash:,.2f}")
 
 
-def _summary_cards(data: pd.DataFrame, settings_path: Path) -> None:
-    portfolio_value, free_cash = _load_portfolio_values(data, settings_path)
+def _summary_cards(data: pd.DataFrame, settings_path: Path, target_summary: dict) -> None:
+    portfolio_value, free_cash = _load_portfolio_values(data, settings_path, target_summary)
     recommended = data[data["suggested_contracts"].fillna(0) > 0]
     avg_pop = data["probability_of_profit"].mean()
     avg_return = data["annualized_return"].mean()
@@ -319,6 +339,14 @@ def _ranked_table(data: pd.DataFrame) -> None:
                 "Capital",
                 format="$%.0f",
             ),
+            "market_premium_total": st.column_config.NumberColumn(
+                "Premium ($)",
+                format="$%.2f",
+            ),
+            "premium_vs_cash_risked_pct": st.column_config.NumberColumn(
+                "Premium vs Risk",
+                format="%.2f%%",
+            ),
         },
     )
 
@@ -354,7 +382,14 @@ def _highlight_flagged_rows(row: pd.Series) -> list[str]:
     return [""] * len(row)
 
 
-def _load_portfolio_values(data: pd.DataFrame, settings_path: Path) -> tuple[float, float]:
+def _load_portfolio_values(
+    data: pd.DataFrame,
+    settings_path: Path,
+    target_summary: dict,
+) -> tuple[float, float]:
+    if "portfolio_value" in target_summary and "free_cash" in target_summary:
+        return float(target_summary["portfolio_value"]), float(target_summary["free_cash"])
+
     if "portfolio_value" in data and data["portfolio_value"].notna().any():
         portfolio_value = float(data["portfolio_value"].dropna().iloc[0])
         free_cash = (

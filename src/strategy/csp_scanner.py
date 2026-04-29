@@ -85,6 +85,7 @@ def run_mock_scan(
         scan_config=effective_scan_config,
         expiration_date=selected_expiration,
         as_of=as_of,
+        underlying_quotes=quotes,
     )
     decision_logger.record(
         f"Fetched {sum(len(chain) for chain in chains.values())} option contracts "

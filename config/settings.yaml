@@ -16,7 +16,7 @@ market_data:
   require_greeks: true
   require_iv: true
   require_open_interest: true
-  require_option_volume: true
+  require_option_volume: false
 
 scanner:
   account_size: 50000
@@ -39,12 +39,12 @@ scanner:
   universe_discovery:
     enabled: true
     use_configured_universe_first: true
-    include_sp500: false
-    include_nasdaq100: false
+    include_sp500: true
+    include_nasdaq100: true
     include_etfs: true
     exclude_leveraged_etfs: true
     min_underlying_volume: null
-    max_symbols: null
+    max_symbols: 180
   default_filters:
     min_underlying_price: 10
     max_underlying_price: 250
