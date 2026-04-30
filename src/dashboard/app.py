@@ -34,12 +34,13 @@ DISPLAY_COLUMNS = [
     "symbol",
     "expiration_date",
     "strike",
+    "open_interest",
     "market_premium_total",
+    "premium_captured",
     "premium_vs_cash_risked_pct",
     "probability_of_profit",
     "annualized_return",
     "final_score",
-    "eligibility_status",
     "risk_flags_display",
     "suggested_contracts",
     "capital_required",
@@ -319,7 +320,7 @@ def _active_scan_controls(
 
     if scan_parameters:
         return {
-            "ranking_mode": scan_parameters.get("ranking_mode", "ultra_safe"),
+            "ranking_mode": scan_parameters.get("ranking_mode", "capital_efficient"),
             "target_weekly_return_pct": scan_parameters.get(
                 "target_weekly_return_pct",
                 DEFAULT_TARGET_WEEKLY_RETURN_PCT,
@@ -335,7 +336,7 @@ def _active_scan_controls(
         settings = load_settings(settings_path)
     except Exception:
         return {
-            "ranking_mode": "ultra_safe",
+            "ranking_mode": "capital_efficient",
             "target_weekly_return_pct": DEFAULT_TARGET_WEEKLY_RETURN_PCT,
             "target_min_pop": DEFAULT_TARGET_MIN_POP,
             "max_delta": DEFAULT_MAX_DELTA,
@@ -394,6 +395,7 @@ def _load_results(path: Path) -> tuple[pd.DataFrame, dict, dict]:
         "premium_score",
         "market_premium_per_contract",
         "market_premium_total",
+        "premium_captured",
         "premium_vs_cash_risked_pct",
         "capital_required",
         "suggested_contracts",
@@ -417,13 +419,6 @@ def _filters(data: pd.DataFrame) -> pd.DataFrame:
             default=ranking_modes,
         )
 
-        eligibility_values = sorted(data["eligibility_status"].dropna().unique())
-        selected_statuses = st.multiselect(
-            "Eligibility",
-            options=eligibility_values,
-            default=eligibility_values,
-        )
-
         all_flags = sorted(
             {
                 flag
@@ -439,7 +434,6 @@ def _filters(data: pd.DataFrame) -> pd.DataFrame:
 
     filtered = data[
         data["ranking_mode_used"].isin(selected_modes)
-        & data["eligibility_status"].isin(selected_statuses)
         & (data["probability_of_profit"].fillna(0) >= min_pop)
         & (data["annualized_return"].fillna(0) >= min_return)
     ]
@@ -553,6 +547,10 @@ def _ranked_table(data: pd.DataFrame) -> None:
         use_container_width=True,
         hide_index=True,
         column_config={
+            "open_interest": st.column_config.NumberColumn(
+                "Open Interest",
+                format="%d",
+            ),
             "probability_of_profit": st.column_config.NumberColumn(
                 "POP",
                 format="%.1%%",
@@ -568,6 +566,10 @@ def _ranked_table(data: pd.DataFrame) -> None:
             ),
             "market_premium_total": st.column_config.NumberColumn(
                 "Premium ($)",
+                format="$%.2f",
+            ),
+            "premium_captured": st.column_config.NumberColumn(
+                "Premium Captured ($)",
                 format="$%.2f",
             ),
             "premium_vs_cash_risked_pct": st.column_config.NumberColumn(
@@ -601,9 +603,6 @@ def _score_breakdown_chart(data: pd.DataFrame) -> None:
 
 def _highlight_flagged_rows(row: pd.Series) -> list[str]:
     flags = row.get("risk_flags_display", "")
-    status = row.get("eligibility_status", "")
-    if status == "rejected":
-        return ["background-color: #fdecec"] * len(row)
     if flags:
         return ["background-color: #fff7dc"] * len(row)
     return [""] * len(row)

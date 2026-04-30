@@ -108,6 +108,7 @@ def run_mock_scan(
     ranked_trades = rank_candidates(
         ranker_inputs,
         mode=effective_scan_config.ranking_mode,
+        hard_pop_min_override=effective_scan_config.portfolio_targets.min_pop,
     )
     decision_logger.record(
         f"Ranked {len(ranked_trades)} candidates using {effective_scan_config.ranking_mode} mode."

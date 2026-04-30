@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Literal
@@ -94,6 +95,7 @@ class RankerInput(BaseModel):
 def rank_candidates(
     inputs: list[RankerInput],
     mode: RankingMode = "ultra_safe",
+    hard_pop_min_override: float | None = None,
 ) -> list[RankedTrade]:
     """Rank candidate trades using mode-specific weights, thresholds, and penalties.
 
@@ -101,7 +103,7 @@ def rank_candidates(
     return, liquidity score, and premium. Component scores are normalized to
     0-100, combined by weights, then reduced by risk-flag penalties.
     """
-    spec = MODE_SPECS[mode]
+    spec = _spec_for_mode(mode, hard_pop_min_override=hard_pop_min_override)
     ranked = [
         _rank_single(rank_input=rank_input, spec=spec, provisional_rank=index + 1)
         for index, rank_input in enumerate(inputs)
@@ -122,9 +124,14 @@ def rank_candidates(
 def rank_candidate(
     rank_input: RankerInput,
     mode: RankingMode = "ultra_safe",
+    hard_pop_min_override: float | None = None,
 ) -> RankedTrade:
     """Rank a single candidate and return a rank-1 `RankedTrade`."""
-    return _rank_single(rank_input=rank_input, spec=MODE_SPECS[mode], provisional_rank=1)
+    return _rank_single(
+        rank_input=rank_input,
+        spec=_spec_for_mode(mode, hard_pop_min_override=hard_pop_min_override),
+        provisional_rank=1,
+    )
 
 
 def classify_eligibility(
@@ -132,6 +139,7 @@ def classify_eligibility(
     probability_of_profit: float | None,
     risk_flags: list[RiskFlag],
     mode: RankingMode = "ultra_safe",
+    hard_pop_min_override: float | None = None,
 ) -> EligibilityStatus:
     """Classify eligibility from hard POP threshold and risk flags.
 
@@ -139,7 +147,7 @@ def classify_eligibility(
     rejection flags are also rejected. Remaining candidates with non-rejection
     flags are eligible with flags; clean candidates are eligible.
     """
-    spec = MODE_SPECS[mode]
+    spec = _spec_for_mode(mode, hard_pop_min_override=hard_pop_min_override)
     safe_pop = _safe_float(probability_of_profit)
     if safe_pop is None or safe_pop < spec.hard_pop_min:
         return EligibilityStatus.REJECTED
@@ -184,6 +192,7 @@ def _rank_single(
         probability_of_profit=rank_input.probability_of_profit,
         risk_flags=risk_flags,
         mode=spec.name,
+        hard_pop_min_override=spec.hard_pop_min,
     )
 
     if eligibility_status == EligibilityStatus.REJECTED:
@@ -243,6 +252,18 @@ def _score_liquidity(value: float | None) -> float:
 
 def _risk_penalty(risk_flags: list[RiskFlag], spec: RankingModeSpec) -> float:
     return sum(spec.flag_penalties.get(flag, 0) for flag in risk_flags)
+
+
+def _spec_for_mode(
+    mode: RankingMode,
+    *,
+    hard_pop_min_override: float | None = None,
+) -> RankingModeSpec:
+    spec = MODE_SPECS[mode]
+    if hard_pop_min_override is None:
+        return spec
+
+    return replace(spec, hard_pop_min=hard_pop_min_override)
 
 
 def _build_rationale(

@@ -86,7 +86,7 @@ class ScanConfig(BaseModel):
     expiration_scope: Literal["weekly"] = "weekly"
     currency: str = "USD"
     default_filters: DefaultFiltersConfig = Field(default_factory=DefaultFiltersConfig)
-    ranking_mode: RankingModeName = "ultra_safe"
+    ranking_mode: RankingModeName = "capital_efficient"
     ranking_modes: dict[RankingModeName, RankingModeConfig]
     portfolio_targets: PortfolioTargetsConfig = Field(default_factory=PortfolioTargetsConfig)
     universe_discovery: UniverseDiscoveryConfig = Field(default_factory=UniverseDiscoveryConfig)

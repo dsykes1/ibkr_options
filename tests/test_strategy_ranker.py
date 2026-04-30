@@ -204,3 +204,32 @@ def test_classify_eligibility_handles_clean_flagged_and_rejected_cases() -> None
         )
         == EligibilityStatus.REJECTED
     )
+
+
+def test_hard_pop_override_allows_lower_scan_threshold() -> None:
+    ranked = rank_candidate(
+        RankerInput(
+            candidate=_candidate(),
+            probability_of_profit=0.85,
+            annualized_return=0.30,
+            liquidity_score=100,
+            premium=2.00,
+        ),
+        mode="capital_efficient",
+        hard_pop_min_override=0.85,
+    )
+
+    assert ranked.eligibility_status == EligibilityStatus.ELIGIBLE
+    assert ranked.final_score > 0
+
+
+def test_classify_eligibility_uses_hard_pop_override() -> None:
+    assert (
+        classify_eligibility(
+            probability_of_profit=0.85,
+            risk_flags=[],
+            mode="capital_efficient",
+            hard_pop_min_override=0.85,
+        )
+        == EligibilityStatus.ELIGIBLE
+    )

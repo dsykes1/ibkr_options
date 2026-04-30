@@ -37,6 +37,10 @@ def test_run_mock_scan_produces_ranked_rejected_and_report_files(tmp_path) -> No
     assert "rank" in ranked_rows[0]
     assert "final_score" in ranked_rows[0]
     assert "suggested_contracts" in ranked_rows[0]
+    assert "premium_captured" in ranked_rows[0]
+    assert "open_interest" in ranked_rows[0]
+    assert "eligibility_status" not in ranked_rows[0]
+    assert all(row["suggested_contracts"] > 0 for row in ranked_rows)
     assert "target_eligible" in ranked_rows[0]
     assert isinstance(rejected_rows, list)
 

@@ -14,7 +14,7 @@ def test_load_settings_reads_default_config() -> None:
     assert settings.market_data.default_type == "live"
     assert settings.market_data.reject_if_delayed is True
     assert settings.scanner.account_size == 50000
-    assert settings.scanner.ranking_mode == "ultra_safe"
+    assert settings.scanner.ranking_mode == "capital_efficient"
     assert "capital_efficient" in settings.scanner.ranking_modes
 
 
