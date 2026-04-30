@@ -35,8 +35,8 @@ DISPLAY_COLUMNS = [
     "expiration_date",
     "strike",
     "open_interest",
+    "bid",
     "market_premium_total",
-    "premium_captured",
     "premium_vs_cash_risked_pct",
     "probability_of_profit",
     "annualized_return",
@@ -393,6 +393,7 @@ def _load_results(path: Path) -> tuple[pd.DataFrame, dict, dict]:
         "return_score",
         "liquidity_score",
         "premium_score",
+        "bid",
         "market_premium_per_contract",
         "market_premium_total",
         "premium_captured",
@@ -511,14 +512,12 @@ def _summary_cards(
     avg_return = recommended["annualized_return"].mean()
     total_capital = recommended["capital_required"].sum()
     unused_cash = max(free_cash - total_capital, 0)
-    capital_used_pct = total_capital / free_cash if free_cash else 0
     active_controls = _active_scan_controls(settings_path, scan_parameters)
 
-    cols = st.columns(4)
+    cols = st.columns(3)
     cols[0].metric("Portfolio Value", f"${portfolio_value:,.0f}")
     cols[1].metric("Free Cash", f"${free_cash:,.0f}")
-    cols[2].metric("Capital Used", f"${total_capital:,.0f}", _format_pct(capital_used_pct))
-    cols[3].metric("Unused Cash", f"${unused_cash:,.0f}")
+    cols[2].metric("Unused Cash", f"${unused_cash:,.0f}")
 
     cols = st.columns(3)
     cols[0].metric("Recommended Trades", f"{len(recommended)}")
@@ -564,12 +563,12 @@ def _ranked_table(data: pd.DataFrame) -> None:
                 "Capital",
                 format="$%.0f",
             ),
-            "market_premium_total": st.column_config.NumberColumn(
-                "Premium ($)",
+            "bid": st.column_config.NumberColumn(
+                "Premium (per share)",
                 format="$%.2f",
             ),
-            "premium_captured": st.column_config.NumberColumn(
-                "Premium Captured ($)",
+            "market_premium_total": st.column_config.NumberColumn(
+                "Total Premium Collected",
                 format="$%.2f",
             ),
             "premium_vs_cash_risked_pct": st.column_config.NumberColumn(
