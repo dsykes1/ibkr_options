@@ -69,6 +69,7 @@ def build_universe(scan_config: ScanConfig) -> list[str]:
     """
     disc = scan_config.universe_discovery
     symbols: list[str] = []
+    seen: set[str] = set()
 
     configured = _normalize(scan_config.universe)
 
@@ -76,20 +77,20 @@ def build_universe(scan_config: ScanConfig) -> list[str]:
         return configured
 
     if disc.use_configured_universe_first:
-        symbols.extend(configured)
+        _extend_unique(symbols, configured, seen)
 
     if disc.include_etfs:
-        symbols.extend(_etf_universe())
+        _extend_unique(symbols, _etf_universe(), seen)
 
     if disc.include_sp500:
-        symbols.extend(_sp500_universe())
+        _extend_unique(symbols, _sp500_universe(), seen)
 
     if disc.include_nasdaq100:
-        symbols.extend(_nasdaq100_universe())
+        _extend_unique(symbols, _nasdaq100_universe(), seen)
 
     if not disc.use_configured_universe_first:
         # Append configured universe at end if not already first
-        symbols.extend(configured)
+        _extend_unique(symbols, configured, seen)
 
     unique = list(dict.fromkeys(symbols))
 
@@ -159,3 +160,12 @@ def _normalize(symbols: list[str]) -> list[str]:
             if s and s.strip()
         )
     )
+
+
+def _extend_unique(target: list[str], source: list[str], seen: set[str]) -> None:
+    """Append only symbols not already added from prior sources."""
+    for symbol in source:
+        if symbol in seen:
+            continue
+        target.append(symbol)
+        seen.add(symbol)

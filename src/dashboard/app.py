@@ -39,6 +39,7 @@ DISPLAY_COLUMNS = [
     "market_premium_total",
     "premium_vs_cash_risked_pct",
     "probability_of_profit",
+    "pop_method",
     "annualized_return",
     "final_score",
     "risk_flags_display",
@@ -554,6 +555,7 @@ def _ranked_table(data: pd.DataFrame) -> None:
                 "POP",
                 format="%.1%%",
             ),
+            "pop_method": st.column_config.TextColumn("POP Method"),
             "annualized_return": st.column_config.NumberColumn(
                 "Annualized Return",
                 format="%.1%%",

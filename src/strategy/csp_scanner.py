@@ -178,7 +178,16 @@ def _evaluate_option(
     fallback_pop = (
         delta_proxy_pop(float(option.delta)) if option.delta is not None else None
     )
-    probability_of_profit = modeled_pop or fallback_pop
+    probability_of_profit = (
+        modeled_pop if modeled_pop is not None else fallback_pop
+    )
+    pop_source = (
+        "black_scholes"
+        if modeled_pop is not None
+        else "delta_proxy"
+        if fallback_pop is not None
+        else "unavailable"
+    )
     annualized = annualized_return(
         premium=float(executable_premium),
         collateral=float(option.strike),
@@ -248,13 +257,17 @@ def _evaluate_option(
         notes=[
             f"days_to_expiry={days_to_expiry}",
             f"break_even={break_even_price}",
-            f"modeled_pop={probability_of_profit}",
+            f"modeled_pop={modeled_pop}",
+            f"delta_proxy_pop={fallback_pop}",
+            f"probability_of_profit={probability_of_profit}",
+            f"pop_source={pop_source}",
             f"annualized_return={annualized}",
             f"liquidity_score={option_liquidity_score}",
         ],
     )
     decision_logger.record(
         f"Evaluated {option.symbol}: POP={_format_optional_float(probability_of_profit)} "
+        f"source={pop_source} "
         f"return={_format_optional_float(annualized)} liquidity={option_liquidity_score:.1f} "
         f"flags={[flag.value for flag in risk_flags]}."
     )
@@ -327,24 +340,30 @@ def _has_tradeable_bid_ask(option: OptionQuote) -> bool:
     return option.bid > 0 and option.ask > 0 and option.ask >= option.bid
 
 
+_UNCAPPED_CONTRACTS = 10_000
+
+
 def _requested_contracts(
     *,
     option: OptionQuote,
     mode_name: str,
     mode_config,
 ) -> int:
+    max_cap = mode_config.max_contracts_per_trade  # None means uncapped
+
     if mode_name != "capital_efficient":
-        return mode_config.max_contracts_per_trade
+        return max_cap if max_cap is not None else _UNCAPPED_CONTRACTS
 
     open_interest_limit_pct = mode_config.open_interest_contract_limit_pct
     if open_interest_limit_pct is None:
-        return mode_config.max_contracts_per_trade
+        return max_cap if max_cap is not None else _UNCAPPED_CONTRACTS
 
     open_interest = max(option.open_interest or 0, 0)
     if open_interest <= 0:
-        return mode_config.max_contracts_per_trade
+        return max_cap if max_cap is not None else _UNCAPPED_CONTRACTS
 
-    return max(int(open_interest * (open_interest_limit_pct / 100)), 1)
+    oi_based = max(int(open_interest * (open_interest_limit_pct / 100)), 1)
+    return min(oi_based, max_cap) if max_cap is not None else oi_based
 
 
 def _has_disallowed_market_data_type(

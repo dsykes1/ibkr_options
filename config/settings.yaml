@@ -19,14 +19,150 @@ market_data:
   require_option_volume: false
 
 scanner:
-  account_size: 50000
-  max_positions: 5
-  max_per_ticker_exposure: 25000
+  account_size: 2000000
+  max_positions: 10
+  max_per_ticker_exposure: 500000
   universe:
     - AAPL
     - MSFT
     - SPY
     - TQQQ
+    - C
+    - COF
+    - AIG
+    - MET
+    - PRU
+    - TRV
+    - TROW
+    - STT
+    - NTRS
+    - CFG
+    - KEY
+    - FITB
+    - HBAN
+    - RF
+    - CMA
+    - MTB
+    - PGR
+    - BA
+    - UNP
+    - LHX
+    - NOC
+    - GD
+    - DAL
+    - UAL
+    - LUV
+    - RCL
+    - CCL
+    - NCLH
+    - URI
+    - CMI
+    - ROK
+    - JCI
+    - PH
+    - SLB
+    - OXY
+    - KMI
+    - HAL
+    - MRO
+    - DVN
+    - CTRA
+    - EQT
+    - APA
+    - FCX
+    - NEM
+    - NUE
+    - STLD
+    - AA
+    - MOS
+    - CF
+    - MLM
+    - VMC
+    - JNJ
+    - CVS
+    - BSX
+    - HCA
+    - EW
+    - A
+    - IQV
+    - BAX
+    - HUM
+    - MGM
+    - WYNN
+    - HLT
+    - YUM
+    - CMG
+    - DPZ
+    - DRI
+    - SYY
+    - KR
+    - DG
+    - KMB
+    - GIS
+    - CLX
+    - MKC
+    - PARA
+    - FOX
+    - FOXA
+    - IPG
+    - OMC
+    - LYV
+    - UBER
+    - DOW
+    - DELL
+    - HPQ
+    - NTAP
+    - ANET
+    - HPE
+    - SMCI
+    - ARM
+    - TTD
+    - NET
+    - DOCU
+    - CPB
+    - SJM
+    - SPOT
+    - ROKU
+    - PINS
+    - SNAP
+    - LYFT
+    - ESTC
+    - OKTA
+    - SQ
+    - SHOP
+    - CRNC
+    - AMT
+    - PSA
+    - O
+    - SBAC
+    - VTR
+    - WELL
+    - DLR
+    - EXR
+    - SRE
+    - NEE
+    - AEE
+    - ED
+    - PEG
+    - PPL
+    - D
+    - WEC
+    - DIA
+    - XBI
+    - SMH
+    - SOXX
+    - XRT
+    - KRE
+    - IYR
+    - XHB
+    - XOP
+    - USO
+    - UNG
+    - GDX
+    - EWT
+    - EWZ
+    - FXI
+    - ARKK
   option_type: put
   expiration_scope: weekly
   currency: USD
@@ -44,10 +180,10 @@ scanner:
     include_etfs: true
     exclude_leveraged_etfs: true
     min_underlying_volume: null
-    max_symbols: 180
+    max_symbols: 344
   default_filters:
     min_underlying_price: 10
-    max_underlying_price: 250
+    max_underlying_price: null
     min_option_volume: 10
     min_open_interest: 100
     max_bid_ask_spread_pct: 15
@@ -62,7 +198,6 @@ scanner:
       min_premium: 20
       min_annualized_return_pct: 8
       max_delta: 0.25
-      max_contracts_per_trade: 1
       prefer_lower_assignment_risk: true
     capital_efficient:
       name: capital_efficient
@@ -71,6 +206,5 @@ scanner:
       min_premium: 15
       min_annualized_return_pct: 12
       max_delta: 0.35
-      max_contracts_per_trade: 2
       open_interest_contract_limit_pct: 1.0
       prefer_lower_assignment_risk: false

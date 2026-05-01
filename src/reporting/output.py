@@ -165,7 +165,12 @@ def _decision_to_row(
         "volume": option.volume,
         "portfolio_value": _json_value(_portfolio_value(decision)),
         "free_cash": _json_value(_free_cash(decision)),
-        "probability_of_profit": _note_float(candidate.notes, "modeled_pop"),
+        "probability_of_profit": _note_float(
+            candidate.notes,
+            "probability_of_profit",
+        )
+        or _note_float(candidate.notes, "modeled_pop"),
+        "pop_method": _note_string(candidate.notes, "pop_source"),
         "annualized_return": _note_float(candidate.notes, "annualized_return"),
         "break_even": _note_float(candidate.notes, "break_even"),
         "ranking_mode_used": trade.ranking_mode_used,
@@ -265,6 +270,21 @@ def _note_float(notes: list[str], key: str) -> float | None:
             return float(raw_value)
         except ValueError:
             return None
+
+    return None
+
+
+def _note_string(notes: list[str], key: str) -> str | None:
+    prefix = f"{key}="
+    for note in notes:
+        if not note.startswith(prefix):
+            continue
+
+        raw_value = note.removeprefix(prefix)
+        if raw_value in {"None", ""}:
+            return None
+
+        return raw_value
 
     return None
 
