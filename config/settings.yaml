@@ -20,7 +20,7 @@ market_data:
 
 scanner:
   account_size: 2000000
-  max_positions: 10
+  max_positions: 20
   max_per_ticker_exposure: 500000
   universe:
     - AAPL

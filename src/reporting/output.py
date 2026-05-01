@@ -35,14 +35,7 @@ def write_scan_outputs(
         decision_log=decision_log_path,
     )
 
-    display_cash = _free_cash(sizing_result)
-    if display_cash <= 0:
-        display_cash = Decimal(str(scan_config.account_size))
-
-    all_rows = [
-        _decision_to_row(decision, available_cash=display_cash)
-        for decision in sizing_result.decisions
-    ]
+    all_rows = [_decision_to_row(decision) for decision in sizing_result.decisions]
     ranked_rows = [row for row in all_rows if row["suggested_contracts"] > 0]
     rejected_rows = [
         row
@@ -137,18 +130,13 @@ def summarize_console(
 
 def _decision_to_row(
     decision: PositionSizingDecision,
-    *,
-    available_cash: Decimal,
 ) -> dict[str, Any]:
     trade = decision.ranked_trade
     candidate = trade.candidate
     option = candidate.option
     underlying = candidate.underlying
-    suggested_contracts = _contracts_for_unused_cash(
-        unused_cash=available_cash,
-        collateral_per_contract=decision.collateral_per_contract,
-    )
-    capital_required = decision.collateral_per_contract * suggested_contracts
+    suggested_contracts = decision.suggested_contracts
+    capital_required = decision.capital_required
     premium_captured = _market_premium_per_contract(decision) * Decimal(suggested_contracts)
 
     return {
@@ -192,12 +180,8 @@ def _decision_to_row(
         "premium_vs_cash_risked_pct": _json_value(
             _premium_vs_cash_risked_pct(capital_required, premium_captured)
         ),
-        "skipped": suggested_contracts == 0,
-        "skip_reason": (
-            "insufficient_unused_cash_for_one_contract"
-            if suggested_contracts == 0
-            else None
-        ),
+        "skipped": decision.skipped,
+        "skip_reason": decision.skip_reason,
         "rationale": trade.rationale,
         # Target fields
         "target_eligible": decision.target_eligible,
@@ -292,17 +276,6 @@ def _note_string(notes: list[str], key: str) -> str | None:
 def _market_premium_per_contract(decision: PositionSizingDecision) -> Decimal:
     option = decision.ranked_trade.candidate.option
     return option.bid * Decimal("100")
-
-
-def _contracts_for_unused_cash(
-    *,
-    unused_cash: Decimal,
-    collateral_per_contract: Decimal,
-) -> int:
-    if collateral_per_contract <= 0 or unused_cash <= 0:
-        return 0
-
-    return int(unused_cash // collateral_per_contract)
 
 
 def _premium_vs_cash_risked_pct(

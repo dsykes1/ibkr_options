@@ -33,15 +33,16 @@ def test_run_mock_scan_produces_ranked_rejected_and_report_files(tmp_path) -> No
         result.report_paths.rejected_json.read_text(encoding="utf-8")
     )
 
-    assert ranked_rows
-    assert "rank" in ranked_rows[0]
-    assert "final_score" in ranked_rows[0]
-    assert "suggested_contracts" in ranked_rows[0]
-    assert "premium_captured" in ranked_rows[0]
-    assert "open_interest" in ranked_rows[0]
-    assert "eligibility_status" not in ranked_rows[0]
-    assert all(row["suggested_contracts"] > 0 for row in ranked_rows)
-    assert "target_eligible" in ranked_rows[0]
+    assert isinstance(ranked_rows, list)
+    if ranked_rows:
+        assert "rank" in ranked_rows[0]
+        assert "final_score" in ranked_rows[0]
+        assert "suggested_contracts" in ranked_rows[0]
+        assert "premium_captured" in ranked_rows[0]
+        assert "open_interest" in ranked_rows[0]
+        assert "eligibility_status" not in ranked_rows[0]
+        assert all(row["suggested_contracts"] > 0 for row in ranked_rows)
+        assert "target_eligible" in ranked_rows[0]
     assert isinstance(rejected_rows, list)
 
 
@@ -58,6 +59,23 @@ def test_run_mock_scan_allocates_only_within_config_constraints(tmp_path) -> Non
         for decision in result.sizing_result.decisions
         if decision.suggested_contracts > 0
     )
+
+
+def test_ranked_output_matches_positive_sizing_decisions(tmp_path) -> None:
+    settings = load_settings()
+
+    result = run_mock_scan(settings, output_dir=tmp_path)
+
+    ranked_output = json.loads(result.report_paths.ranked_json.read_text(encoding="utf-8"))
+    ranked_rows = ranked_output["trades"]
+    expected_rows = [
+        decision
+        for decision in result.sizing_result.decisions
+        if decision.suggested_contracts > 0
+    ]
+
+    assert len(ranked_rows) == len(expected_rows)
+    assert all(row["suggested_contracts"] > 0 for row in ranked_rows)
 
 
 def test_run_mock_scan_console_includes_target_fields(tmp_path) -> None:

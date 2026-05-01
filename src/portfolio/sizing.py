@@ -221,17 +221,18 @@ def _premium_vs_risked_pct(ranked_trade: RankedTrade) -> float | None:
 
 
 def _pop_from_notes(candidate) -> float | None:
-    """Extract the modeled_pop value stored in candidate notes, if present."""
-    prefix = "modeled_pop="
-    for note in candidate.notes:
-        if note.startswith(prefix):
-            raw = note.removeprefix(prefix)
-            if raw in {"None", ""}:
-                return None
-            try:
-                return float(raw)
-            except ValueError:
-                return None
+    """Extract POP from notes, preferring the final probability_of_profit field."""
+    for key in ("probability_of_profit", "modeled_pop", "delta_proxy_pop"):
+        prefix = f"{key}="
+        for note in candidate.notes:
+            if note.startswith(prefix):
+                raw = note.removeprefix(prefix)
+                if raw in {"None", ""}:
+                    return None
+                try:
+                    return float(raw)
+                except ValueError:
+                    return None
     return None
 
 

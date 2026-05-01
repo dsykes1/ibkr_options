@@ -131,9 +131,6 @@ def _scan_controls() -> Path:
         selected_ranking_mode = st.selectbox(
             "Ranking Mode",
             options=ranking_mode_options,
-            index=ranking_mode_options.index(st.session_state[SCAN_RANKING_MODE_KEY])
-            if st.session_state[SCAN_RANKING_MODE_KEY] in ranking_mode_options
-            else 0,
             key=SCAN_RANKING_MODE_KEY,
         )
         if settings_preview is not None:
@@ -498,7 +495,15 @@ def _target_cards(target_summary: dict) -> None:
         delta_color="normal" if target_met else "off",
     )
     cols[2].metric("Target Achieved", f"{achieved_pct:.1f}%", delta="Met" if target_met else "Not met")
-    cols[3].metric("Unused Cash", f"${unused_cash:,.2f}")
+    free_cash_total = target_summary.get("free_cash", 0)
+    idle_pct = (unused_cash / free_cash_total * 100) if free_cash_total > 0 else 0
+    cols[3].metric(
+        "Unused Cash",
+        f"${unused_cash:,.0f}",
+        delta=f"{idle_pct:.1f}% of free cash idle",
+        delta_color="off",
+        help="Cash not deployed due to position or concentration limits.",
+    )
 
 
 def _summary_cards(
@@ -512,13 +517,18 @@ def _summary_cards(
     avg_pop = recommended["probability_of_profit"].mean()
     avg_return = recommended["annualized_return"].mean()
     total_capital = recommended["capital_required"].sum()
-    unused_cash = max(free_cash - total_capital, 0)
     active_controls = _active_scan_controls(settings_path, scan_parameters)
 
     cols = st.columns(3)
     cols[0].metric("Portfolio Value", f"${portfolio_value:,.0f}")
     cols[1].metric("Free Cash", f"${free_cash:,.0f}")
-    cols[2].metric("Unused Cash", f"${unused_cash:,.0f}")
+    deployed_pct = (total_capital / free_cash * 100) if free_cash > 0 else 0
+    cols[2].metric(
+        "Capital Deployed",
+        f"${total_capital:,.0f}",
+        delta=f"{deployed_pct:.1f}% of free cash",
+        delta_color="off",
+    )
 
     cols = st.columns(3)
     cols[0].metric("Recommended Trades", f"{len(recommended)}")
@@ -541,6 +551,9 @@ def _ranked_table(data: pd.DataFrame) -> None:
         return
 
     display_data = data[[column for column in DISPLAY_COLUMNS if column in data]].copy()
+    if "rank" in display_data.columns:
+        # Re-index rank for the currently visible rows after filters/sort.
+        display_data["rank"] = range(1, len(display_data) + 1)
     styled = display_data.style.apply(_highlight_flagged_rows, axis=1)
     st.dataframe(
         styled,
