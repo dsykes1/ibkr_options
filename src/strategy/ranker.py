@@ -45,6 +45,7 @@ MODE_SPECS: dict[RankingMode, RankingModeSpec] = {
             RiskFlag.LOW_PRICE_STOCK: 20,
             RiskFlag.LEVERAGED_ETF: 30,
             RiskFlag.HIGH_IV: 10,
+            RiskFlag.KNOWN_EVENT_NEAR_EXPIRATION: 10,
             RiskFlag.CONCENTRATION_RISK: 100,
         },
         rejection_flags=frozenset(
@@ -71,6 +72,7 @@ MODE_SPECS: dict[RankingMode, RankingModeSpec] = {
             RiskFlag.LOW_PRICE_STOCK: 15,
             RiskFlag.LEVERAGED_ETF: 20,
             RiskFlag.HIGH_IV: 8,
+            RiskFlag.KNOWN_EVENT_NEAR_EXPIRATION: 8,
             RiskFlag.CONCENTRATION_RISK: 100,
         },
         rejection_flags=frozenset(

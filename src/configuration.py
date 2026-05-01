@@ -1,3 +1,4 @@
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -25,6 +26,17 @@ class UniverseDiscoveryConfig(BaseModel):
     exclude_leveraged_etfs: bool = True
     min_underlying_volume: int | None = Field(default=None, ge=0)
     max_symbols: int | None = Field(default=None, gt=0)
+
+
+class SymbolMetadataConfig(BaseModel):
+    sector: str | None = None
+    themes: list[str] = Field(default_factory=list)
+    next_earnings_date: date | None = None
+    next_known_event_date: date | None = None
+    next_known_event_name: str | None = None
+    iv_rank: float | None = Field(default=None, ge=0, le=100)
+    iv_percentile: float | None = Field(default=None, ge=0, le=100)
+    assignment_plan: str | None = None
 
 
 class AppConfig(BaseModel):
@@ -78,9 +90,11 @@ class RankingModeConfig(BaseModel):
 
 
 class ScanConfig(BaseModel):
-    account_size: float = Field(gt=0)
+    account_size: float = Field(default=0.0, ge=0)
     max_positions: int = Field(gt=0)
     max_per_ticker_exposure: float = Field(gt=0)
+    active_universe: str = "full"
+    universes: dict[str, list[str]] = Field(default_factory=dict)
     universe: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "SPY", "TQQQ"])
     option_type: Literal["put"] = "put"
     expiration_scope: Literal["weekly"] = "weekly"
@@ -90,6 +104,7 @@ class ScanConfig(BaseModel):
     ranking_modes: dict[RankingModeName, RankingModeConfig]
     portfolio_targets: PortfolioTargetsConfig = Field(default_factory=PortfolioTargetsConfig)
     universe_discovery: UniverseDiscoveryConfig = Field(default_factory=UniverseDiscoveryConfig)
+    symbol_metadata: dict[str, SymbolMetadataConfig] = Field(default_factory=dict)
 
 
 class Settings(BaseModel):

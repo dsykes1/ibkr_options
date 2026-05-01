@@ -71,10 +71,14 @@ def build_universe(scan_config: ScanConfig) -> list[str]:
     symbols: list[str] = []
     seen: set[str] = set()
 
-    configured = _normalize(scan_config.universe)
+    active_universe = scan_config.active_universe.strip().lower()
+    configured = _normalize(_configured_universe(scan_config))
+
+    if active_universe != "full":
+        return _apply_universe_limits(configured, scan_config)
 
     if not disc.enabled:
-        return configured
+        return _apply_universe_limits(configured, scan_config)
 
     if disc.use_configured_universe_first:
         _extend_unique(symbols, configured, seen)
@@ -92,6 +96,19 @@ def build_universe(scan_config: ScanConfig) -> list[str]:
         # Append configured universe at end if not already first
         _extend_unique(symbols, configured, seen)
 
+    return _apply_universe_limits(list(dict.fromkeys(symbols)), scan_config)
+
+
+def _configured_universe(scan_config: ScanConfig) -> list[str]:
+    active_universe = scan_config.active_universe.strip()
+    if active_universe and active_universe in scan_config.universes:
+        return scan_config.universes[active_universe]
+
+    return scan_config.universe
+
+
+def _apply_universe_limits(symbols: list[str], scan_config: ScanConfig) -> list[str]:
+    disc = scan_config.universe_discovery
     unique = list(dict.fromkeys(symbols))
 
     if disc.exclude_leveraged_etfs:

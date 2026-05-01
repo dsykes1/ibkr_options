@@ -19,147 +19,148 @@ market_data:
   require_option_volume: false
 
 scanner:
-  account_size: 2000000
   max_positions: 20
-  max_per_ticker_exposure: 500000
+  max_per_ticker_exposure: 200000
+  active_universe: targeted
+  universes:
+    targeted:
+      - TQQQ
+      - SOXL
+      - NVDA
+      - AMD
+      - AVGO
+      - MU
+      - MRVL
+      - PLTR
+      - SMCI
+      - ARM
+      - IREN
+      - CRWV
+      - NET
+      - TTD
+      - SHOP
+      - ROKU
+      - SNAP
+      - SQ
+      - TSLA
+      - COIN
+      - MSTR
+      - MARA
+      - RIOT
+      - CLSK
+      - HOOD
+      - AFRM
+      - UPST
+      - RIVN
+      - DDOG
+      - CRWD
+      - ZS
+      - SNOW
+      - XBI
+      - SMH
+      - SOXX
+      - KRE
+      - XOP
+      - LABU
+      - TNA
+      - ARKK
   universe:
     - AAPL
     - MSFT
     - SPY
+    - QQQ
+    - IWM
+    - TSLA
+    - NVDA
+    - AMD
+    - AVGO
+    - MU
+    - MRVL
+    - PLTR
+    - AI
+    - SOUN
+    - SMCI
+    - ARM
+    - ANET
+    - DELL
+    - HPE
+    - NTAP
+    - NET
+    - TTD
+    - SHOP
+    - ROKU
+    - SNAP
+    - SQ
+    - HOOD
+    - AFRM
+    - UPST
+    - RIVN
+    - LCID
+    - UBER
+    - LYFT
+    - COIN
+    - MSTR
+    - MARA
+    - RIOT
+    - CLSK
+    - HUT
+    - BITF
+    - IREN
+    - CRWV
     - TQQQ
+    - SOXL
+    - UPRO
+    - TNA
+    - LABU
     - C
     - COF
-    - AIG
-    - MET
-    - PRU
-    - TRV
-    - TROW
-    - STT
-    - NTRS
     - CFG
     - KEY
     - FITB
     - HBAN
     - RF
     - CMA
-    - MTB
-    - PGR
-    - BA
-    - UNP
-    - LHX
-    - NOC
-    - GD
     - DAL
     - UAL
     - LUV
     - RCL
     - CCL
     - NCLH
-    - URI
-    - CMI
-    - ROK
-    - JCI
-    - PH
     - SLB
     - OXY
-    - KMI
     - HAL
-    - MRO
     - DVN
-    - CTRA
     - EQT
     - APA
     - FCX
     - NEM
-    - NUE
-    - STLD
     - AA
-    - MOS
-    - CF
-    - MLM
-    - VMC
-    - JNJ
-    - CVS
-    - BSX
-    - HCA
-    - EW
-    - A
-    - IQV
-    - BAX
-    - HUM
     - MGM
     - WYNN
-    - HLT
-    - YUM
-    - CMG
-    - DPZ
-    - DRI
-    - SYY
-    - KR
-    - DG
-    - KMB
-    - GIS
-    - CLX
-    - MKC
-    - PARA
-    - FOX
-    - FOXA
-    - IPG
-    - OMC
     - LYV
-    - UBER
-    - DOW
-    - DELL
-    - HPQ
-    - NTAP
-    - ANET
-    - HPE
-    - SMCI
-    - ARM
-    - TTD
-    - NET
     - DOCU
-    - CPB
-    - SJM
     - SPOT
-    - ROKU
     - PINS
-    - SNAP
-    - LYFT
     - ESTC
     - OKTA
-    - SQ
-    - SHOP
-    - CRNC
-    - AMT
-    - PSA
-    - O
-    - SBAC
-    - VTR
-    - WELL
-    - DLR
-    - EXR
-    - SRE
-    - NEE
-    - AEE
-    - ED
-    - PEG
-    - PPL
-    - D
-    - WEC
-    - DIA
+    - DDOG
+    - MDB
+    - CRWD
+    - ZS
+    - SNOW
+    - BABA
+    - PDD
+    - BIDU
+    - JD
     - XBI
     - SMH
     - SOXX
     - XRT
     - KRE
-    - IYR
-    - XHB
     - XOP
     - USO
     - UNG
     - GDX
-    - EWT
     - EWZ
     - FXI
     - ARKK
@@ -178,15 +179,45 @@ scanner:
     include_sp500: true
     include_nasdaq100: true
     include_etfs: true
-    exclude_leveraged_etfs: true
+    exclude_leveraged_etfs: false
     min_underlying_volume: null
     max_symbols: 344
+  symbol_metadata:
+    TQQQ:
+      sector: ETF
+      themes:
+        - leveraged_etf
+        - nasdaq_100
+        - high_beta
+      assignment_plan: Avoid assignment when possible; if assigned, treat as a tactical leveraged index position and consider rapid exit or covered calls only at conservative size.
+    SOXL:
+      sector: ETF
+      themes:
+        - leveraged_etf
+        - semiconductors
+        - high_beta
+      assignment_plan: Avoid assignment when possible; if assigned, treat as tactical semiconductor leverage and reduce quickly or sell covered calls only with strict size limits.
+    IREN:
+      sector: Technology
+      themes:
+        - bitcoin_mining
+        - ai_infrastructure
+        - crypto_beta
+        - high_beta
+      assignment_plan: Only accept assignment if comfortable owning a volatile crypto/AI infrastructure equity; otherwise close or roll before expiration.
+    CRWV:
+      sector: Technology
+      themes:
+        - ai_infrastructure
+        - cloud_compute
+        - high_beta
+      assignment_plan: Only accept assignment if comfortable owning a volatile AI infrastructure equity; otherwise close or roll before expiration.
   default_filters:
     min_underlying_price: 10
     max_underlying_price: null
     min_option_volume: 10
     min_open_interest: 100
-    max_bid_ask_spread_pct: 15
+    max_bid_ask_spread_pct: 5
     min_days_to_expiration: 1
     max_days_to_expiration: 7
     exclude_earnings_within_days: 7

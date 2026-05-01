@@ -38,6 +38,47 @@ def test_discovery_disabled_returns_configured_universe() -> None:
     assert result == ["AAPL", "MSFT"]
 
 
+def test_targeted_active_universe_uses_named_list_without_discovery() -> None:
+    disc = UniverseDiscoveryConfig(
+        enabled=True,
+        use_configured_universe_first=True,
+        include_etfs=True,
+        include_sp500=True,
+        include_nasdaq100=True,
+        exclude_leveraged_etfs=False,
+    )
+    config = _scan_config(universe=["AAPL", "MSFT"], discovery=disc).model_copy(
+        update={
+            "active_universe": "targeted",
+            "universes": {"targeted": ["TQQQ", "SOXL", "IREN"]},
+        }
+    )
+
+    result = build_universe(config)
+
+    assert result == ["TQQQ", "SOXL", "IREN"]
+
+
+def test_full_active_universe_keeps_discovery_behavior() -> None:
+    disc = UniverseDiscoveryConfig(
+        enabled=True,
+        use_configured_universe_first=True,
+        include_etfs=True,
+        exclude_leveraged_etfs=False,
+    )
+    config = _scan_config(universe=["AAPL"], discovery=disc).model_copy(
+        update={
+            "active_universe": "full",
+            "universes": {"targeted": ["TQQQ"]},
+        }
+    )
+
+    result = build_universe(config)
+
+    assert result[0] == "AAPL"
+    assert "SPY" in result
+
+
 def test_discovery_enabled_includes_configured_universe_first() -> None:
     """With use_configured_universe_first=True, configured symbols appear first."""
     disc = UniverseDiscoveryConfig(

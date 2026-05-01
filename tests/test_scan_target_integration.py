@@ -22,6 +22,7 @@ def test_scan_report_includes_target_summary_fields(tmp_path) -> None:
     assert "unused_cash" in summary
     assert "portfolio_value" in summary
     assert "free_cash" in summary
+    assert "premium_drop_counts" in summary
     assert isinstance(summary["target_weekly_premium"], (int, float))
     assert isinstance(summary["premium_captured"], (int, float))
     assert summary["target_achieved_pct"] >= 0.0
@@ -35,6 +36,7 @@ def test_scan_report_includes_scan_parameters(tmp_path) -> None:
     scan_parameters = ranked_output["scan_parameters"]
 
     assert scan_parameters["ranking_mode"] == settings.scanner.ranking_mode
+    assert scan_parameters["active_universe"] == settings.scanner.active_universe
     assert scan_parameters["target_weekly_return_pct"] == settings.scanner.portfolio_targets.weekly_return_target_pct
     assert scan_parameters["target_min_pop"] == settings.scanner.portfolio_targets.min_pop
     assert scan_parameters["max_delta"] == settings.scanner.ranking_modes[settings.scanner.ranking_mode].max_delta

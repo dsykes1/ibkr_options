@@ -9,6 +9,7 @@ from data.models import OptionQuote, UnderlyingQuote
 
 class RiskFlag(StrEnum):
     EARNINGS_NEAR_EXPIRATION = "earnings_near_expiration"
+    KNOWN_EVENT_NEAR_EXPIRATION = "known_event_near_expiration"
     LOW_LIQUIDITY = "low_liquidity"
     WIDE_SPREAD = "wide_spread"
     DATA_QUALITY_WARNING = "data_quality_warning"

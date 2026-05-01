@@ -7,7 +7,12 @@ from pathlib import Path
 
 from analytics.liquidity import liquidity_score, spread_pct
 from analytics.pop import delta_proxy_pop, model_pop_above_break_even
-from analytics.returns import annualized_return, break_even
+from analytics.returns import (
+    annualized_return,
+    break_even,
+    distance_to_break_even_pct,
+    distance_to_strike_pct,
+)
 from analytics.risk_flags import identify_risk_flags
 from broker.base import Broker
 from broker.mock_broker import MOCK_AS_OF, MockBroker
@@ -72,7 +77,12 @@ def run_mock_scan(
     decision_logger.record(f"Fetched {len(quotes)} underlying quotes.")
 
     # Pre-scan underlying filter
-    quotes = _filter_underlyings(quotes, effective_scan_config, decision_logger)
+    quotes = _filter_underlyings(
+        quotes,
+        effective_scan_config,
+        decision_logger,
+        as_of=as_of,
+    )
     decision_logger.record(
         f"After pre-scan filter: {len(quotes)} underlyings remain."
     )
@@ -93,6 +103,7 @@ def run_mock_scan(
     )
 
     ranker_inputs: list[RankerInput] = []
+    premium_drop_counts: dict[str, int] = {}
     for symbol, chain in chains.items():
         underlying = quotes[symbol]
         for option in chain:
@@ -103,6 +114,14 @@ def run_mock_scan(
                 as_of=as_of,
                 decision_logger=decision_logger,
             )
+            if not _meets_target_premium_vs_strike(ranker_input, effective_settings):
+                premium_drop_counts[symbol] = premium_drop_counts.get(symbol, 0) + 1
+                decision_logger.record(
+                    f"Dropped {option.symbol}: bid premium/strike below "
+                    f"{effective_scan_config.portfolio_targets.weekly_return_target_pct:.2f}% "
+                    "weekly target."
+                )
+                continue
             ranker_inputs.append(ranker_input)
 
     ranked_trades = rank_candidates(
@@ -113,6 +132,15 @@ def run_mock_scan(
     decision_logger.record(
         f"Ranked {len(ranked_trades)} candidates using {effective_scan_config.ranking_mode} mode."
     )
+    if premium_drop_counts:
+        dropped_summary = ", ".join(
+            f"{symbol}={count}"
+            for symbol, count in sorted(
+                premium_drop_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        )
+        decision_logger.record(f"Premium target drops by ticker: {dropped_summary}.")
 
     sizing_result = size_ranked_trades(
         ranked_trades,
@@ -129,6 +157,7 @@ def run_mock_scan(
         sizing_result=sizing_result,
         decision_log_path=log_path,
         scan_config=effective_scan_config,
+        premium_drop_counts=premium_drop_counts,
         output_dir=output_dir,
     )
     console_output = summarize_console(
@@ -162,9 +191,19 @@ def _evaluate_option(
     decision_logger: DecisionLogger,
 ) -> RankerInput:
     executable_premium = option.bid
+    midpoint_premium = (option.bid + option.ask) / Decimal("2")
     collateral = option.strike * Decimal("100")
     days_to_expiry = max((option.expiration_date.date() - as_of).days, 1)
     break_even_price = break_even(float(option.strike), float(executable_premium))
+    distance_to_strike = distance_to_strike_pct(
+        float(underlying.last_price),
+        float(option.strike),
+    )
+    distance_to_break_even = (
+        distance_to_break_even_pct(float(underlying.last_price), break_even_price)
+        if break_even_price is not None
+        else None
+    )
     modeled_pop = (
         model_pop_above_break_even(
             underlying_price=float(underlying.last_price),
@@ -194,6 +233,7 @@ def _evaluate_option(
         days_to_expiry=days_to_expiry,
     )
     option_spread_pct = spread_pct(float(option.bid), float(option.ask))
+    metadata = settings.scanner.symbol_metadata.get(underlying.symbol.upper())
     option_liquidity_score = liquidity_score(
         bid=float(option.bid),
         ask=float(option.ask),
@@ -224,6 +264,12 @@ def _evaluate_option(
             settings=settings,
         )
     )
+    if _event_within_window(
+        metadata.next_known_event_date if metadata is not None else None,
+        as_of=as_of,
+        window_days=settings.scanner.default_filters.exclude_earnings_within_days,
+    ):
+        risk_flags.append(RiskFlag.KNOWN_EVENT_NEAR_EXPIRATION)
     if not _has_tradeable_bid_ask(option):
         risk_flags.append(RiskFlag.DATA_QUALITY_WARNING)
         probability_of_profit = None
@@ -257,12 +303,27 @@ def _evaluate_option(
         notes=[
             f"days_to_expiry={days_to_expiry}",
             f"break_even={break_even_price}",
+            f"distance_to_strike_pct={distance_to_strike}",
+            f"distance_to_break_even_pct={distance_to_break_even}",
+            f"bid_ask_spread_pct={option_spread_pct}",
+            f"mid_price={midpoint_premium}",
+            "return_premium_basis=bid",
             f"modeled_pop={modeled_pop}",
             f"delta_proxy_pop={fallback_pop}",
             f"probability_of_profit={probability_of_profit}",
             f"pop_source={pop_source}",
             f"annualized_return={annualized}",
             f"liquidity_score={option_liquidity_score}",
+            f"sector={metadata.sector if metadata is not None else None}",
+            f"themes={','.join(metadata.themes) if metadata is not None else None}",
+            f"next_earnings_date={metadata.next_earnings_date if metadata is not None else None}",
+            f"next_known_event_date={metadata.next_known_event_date if metadata is not None else None}",
+            f"next_known_event_name={metadata.next_known_event_name if metadata is not None else None}",
+            f"iv_rank={metadata.iv_rank if metadata is not None else None}",
+            f"iv_percentile={metadata.iv_percentile if metadata is not None else None}",
+            f"max_loss_at_assignment={collateral - executable_premium * Decimal('100')}",
+            f"assignment_cost_basis={break_even_price}",
+            f"assignment_plan={_assignment_plan(underlying.symbol, metadata)}",
         ],
     )
     decision_logger.record(
@@ -313,6 +374,19 @@ def _config_filter_flags(
         flags.append(RiskFlag.ABOVE_MAX_DELTA)
 
     return flags
+
+
+def _meets_target_premium_vs_strike(
+    ranker_input: RankerInput,
+    settings: Settings,
+) -> bool:
+    option = ranker_input.candidate.option
+    if option.strike <= 0:
+        return False
+
+    premium_vs_strike_pct = (option.bid / option.strike) * Decimal("100")
+    target_pct = Decimal(str(settings.scanner.portfolio_targets.weekly_return_target_pct))
+    return premium_vs_strike_pct >= target_pct
 
 
 def _missing_required_option_fields(option: OptionQuote, settings: Settings) -> bool:
@@ -391,6 +465,8 @@ def _filter_underlyings(
     quotes: dict[str, UnderlyingQuote],
     scan_config,
     decision_logger: DecisionLogger,
+    *,
+    as_of: date,
 ) -> dict[str, UnderlyingQuote]:
     """Apply pre-scan underlying-level filters before option chain fetch.
 
@@ -399,7 +475,7 @@ def _filter_underlyings(
     - Leveraged ETF exclusion (if universe_discovery.exclude_leveraged_etfs)
     - Minimum underlying volume (if universe_discovery.min_underlying_volume set)
     - Collateral feasibility (at least 1 contract fits account)
-    - Earnings placeholder: warns but does not reject (data unavailable)
+    - Earnings exclusion when symbol metadata has an earnings date inside the configured window
     """
     filters = scan_config.default_filters
     disc = scan_config.universe_discovery
@@ -430,6 +506,18 @@ def _filter_underlyings(
                     f"volume {vol} below min {disc.min_underlying_volume}"
                 )
 
+        metadata = scan_config.symbol_metadata.get(symbol.upper())
+        earnings_date = metadata.next_earnings_date if metadata is not None else None
+        if _event_within_window(
+            earnings_date,
+            as_of=as_of,
+            window_days=filters.exclude_earnings_within_days,
+        ):
+            reasons.append(
+                f"earnings {earnings_date.isoformat()} within "
+                f"{filters.exclude_earnings_within_days} days"
+            )
+
         # Collateral feasibility: strike roughly ~underlying price; skip if can't fill 1 contract
         min_collateral = price * 100 * 0.70  # rough OTM assumption
         if min_collateral > account_size:
@@ -443,11 +531,38 @@ def _filter_underlyings(
             )
             continue
 
-        # Earnings placeholder — warn only; data not yet available
+        earnings_note = (
+            f"next earnings {earnings_date.isoformat()}"
+            if earnings_date is not None
+            else "earnings data unavailable; manual check recommended"
+        )
         decision_logger.record(
-            f"Underlying {symbol} passed pre-scan filter "
-            f"(earnings data unavailable — manual check recommended)."
+            f"Underlying {symbol} passed pre-scan filter ({earnings_note})."
         )
         result[symbol] = quote
 
     return result
+
+
+def _event_within_window(
+    event_date: date | None,
+    *,
+    as_of: date,
+    window_days: int | None,
+) -> bool:
+    if event_date is None or window_days is None:
+        return False
+
+    days_until_event = (event_date - as_of).days
+    return 0 <= days_until_event <= window_days
+
+
+def _assignment_plan(symbol: str, metadata) -> str:
+    if metadata is not None and metadata.assignment_plan:
+        return metadata.assignment_plan
+
+    return (
+        f"If assigned, buy 100 shares per contract of {symbol} at the strike; "
+        "only enter if the break-even price is acceptable and the position can be held, "
+        "reduced, or managed with covered calls."
+    )

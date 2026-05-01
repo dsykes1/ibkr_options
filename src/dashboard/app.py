@@ -26,6 +26,7 @@ SCAN_RANKING_MODE_KEY = "scan_ranking_mode"
 SCAN_TARGET_WEEKLY_RETURN_KEY = "scan_target_weekly_return_pct"
 SCAN_TARGET_MIN_POP_KEY = "scan_target_min_pop"
 SCAN_MAX_DELTA_KEY = "scan_max_delta"
+SCAN_ACTIVE_UNIVERSE_KEY = "scan_active_universe"
 LAST_SCAN_CONTROLS_KEY = "last_scan_controls"
 
 
@@ -34,15 +35,18 @@ DISPLAY_COLUMNS = [
     "symbol",
     "expiration_date",
     "strike",
+    "underlying_price",
+    "distance_to_break_even_pct",
     "open_interest",
     "bid",
+    "bid_ask_spread_pct",
     "market_premium_total",
     "premium_vs_cash_risked_pct",
     "probability_of_profit",
-    "pop_method",
     "annualized_return",
+    "portfolio_concentration_pct",
+    "max_loss_at_assignment_per_contract",
     "final_score",
-    "risk_flags_display",
     "suggested_contracts",
     "capital_required",
     "target_eligible",
@@ -133,6 +137,15 @@ def _scan_controls() -> Path:
             options=ranking_mode_options,
             key=SCAN_RANKING_MODE_KEY,
         )
+        universe_options = _universe_options(settings_preview)
+        _ensure_choice_state(SCAN_ACTIVE_UNIVERSE_KEY, universe_options)
+        selected_active_universe = st.radio(
+            "Scan Universe",
+            options=universe_options,
+            horizontal=True,
+            key=SCAN_ACTIVE_UNIVERSE_KEY,
+            help="Targeted scans a smaller high-premium list; full scans the broader universe.",
+        )
         if settings_preview is not None:
             mode_default_delta = _default_max_delta_for_mode(
                 settings_preview,
@@ -187,6 +200,7 @@ def _scan_controls() -> Path:
                 target_weekly_return_pct=target_weekly_return_pct,
                 target_min_pop=target_min_pop,
                 max_delta=max_delta,
+                active_universe=selected_active_universe,
             )
             broker = (
                 IbkrClient(
@@ -221,6 +235,7 @@ def _scan_controls() -> Path:
         "target_weekly_return_pct": target_weekly_return_pct,
         "target_min_pop": target_min_pop,
         "max_delta": max_delta,
+        "active_universe": selected_active_universe,
     }
 
     st.success("Scan complete.")
@@ -236,6 +251,7 @@ def _apply_scan_overrides(
     target_weekly_return_pct: float,
     target_min_pop: float,
     max_delta: float,
+    active_universe: str,
 ):
     selected_mode = settings.scanner.ranking_modes[ranking_mode]
     return settings.model_copy(
@@ -243,6 +259,7 @@ def _apply_scan_overrides(
             "scanner": settings.scanner.model_copy(
                 update={
                     "ranking_mode": ranking_mode,
+                    "active_universe": active_universe,
                     "ranking_modes": {
                         **settings.scanner.ranking_modes,
                         ranking_mode: selected_mode.model_copy(
@@ -268,6 +285,7 @@ def _default_scan_controls(settings_preview, *, ranking_mode_options: list[str])
             "target_weekly_return_pct": DEFAULT_TARGET_WEEKLY_RETURN_PCT,
             "target_min_pop": DEFAULT_TARGET_MIN_POP,
             "max_delta": DEFAULT_MAX_DELTA,
+            "active_universe": "full",
         }
 
     ranking_mode = settings_preview.scanner.ranking_mode
@@ -281,6 +299,7 @@ def _default_scan_controls(settings_preview, *, ranking_mode_options: list[str])
         ),
         "target_min_pop": float(settings_preview.scanner.portfolio_targets.min_pop),
         "max_delta": _default_max_delta_for_mode(settings_preview, ranking_mode),
+        "active_universe": settings_preview.scanner.active_universe,
     }
 
 
@@ -299,6 +318,7 @@ def _ensure_scan_control_state(default_controls: dict[str, float | str]) -> None
     )
     st.session_state.setdefault(SCAN_TARGET_MIN_POP_KEY, default_controls["target_min_pop"])
     st.session_state.setdefault(SCAN_MAX_DELTA_KEY, default_controls["max_delta"])
+    st.session_state.setdefault(SCAN_ACTIVE_UNIVERSE_KEY, default_controls["active_universe"])
 
 
 def _set_scan_control_state(default_controls: dict[str, float | str]) -> None:
@@ -306,6 +326,7 @@ def _set_scan_control_state(default_controls: dict[str, float | str]) -> None:
     st.session_state[SCAN_TARGET_WEEKLY_RETURN_KEY] = default_controls["target_weekly_return_pct"]
     st.session_state[SCAN_TARGET_MIN_POP_KEY] = default_controls["target_min_pop"]
     st.session_state[SCAN_MAX_DELTA_KEY] = default_controls["max_delta"]
+    st.session_state[SCAN_ACTIVE_UNIVERSE_KEY] = default_controls["active_universe"]
 
 
 def _active_scan_controls(
@@ -328,6 +349,7 @@ def _active_scan_controls(
                 DEFAULT_TARGET_MIN_POP,
             ),
             "max_delta": scan_parameters.get("max_delta", DEFAULT_MAX_DELTA),
+            "active_universe": scan_parameters.get("active_universe", "full"),
         }
 
     try:
@@ -338,6 +360,7 @@ def _active_scan_controls(
             "target_weekly_return_pct": DEFAULT_TARGET_WEEKLY_RETURN_PCT,
             "target_min_pop": DEFAULT_TARGET_MIN_POP,
             "max_delta": DEFAULT_MAX_DELTA,
+            "active_universe": "full",
         }
 
     return _default_scan_controls(
@@ -353,6 +376,23 @@ def _enabled_ranking_modes(settings) -> list[str]:
         if mode_config.enabled
     ]
     return enabled_modes or [settings.scanner.ranking_mode]
+
+
+def _universe_options(settings_preview) -> list[str]:
+    if settings_preview is None:
+        return ["targeted", "full"]
+
+    options = [
+        settings_preview.scanner.active_universe,
+        *settings_preview.scanner.universes.keys(),
+        "full",
+    ]
+    return list(dict.fromkeys(options))
+
+
+def _ensure_choice_state(key: str, options: list[str]) -> None:
+    if st.session_state.get(key) not in options and options:
+        st.session_state[key] = options[0]
 
 
 def _load_results(path: Path) -> tuple[pd.DataFrame, dict, dict]:
@@ -398,6 +438,13 @@ def _load_results(path: Path) -> tuple[pd.DataFrame, dict, dict]:
         "premium_vs_cash_risked_pct",
         "capital_required",
         "suggested_contracts",
+        "distance_to_strike_pct",
+        "distance_to_break_even_pct",
+        "bid_ask_spread_pct",
+        "iv_rank",
+        "iv_percentile",
+        "portfolio_concentration_pct",
+        "max_loss_at_assignment_per_contract",
     ]:
         if column in data:
             data[column] = pd.to_numeric(data[column], errors="coerce")
@@ -538,10 +585,33 @@ def _summary_cards(
     st.caption(
         "Active scan thresholds: "
         f"mode={active_controls['ranking_mode']}, "
+        f"universe={active_controls['active_universe']}, "
         f"premium vs strike >= {float(active_controls['target_weekly_return_pct']):.2f}%, "
         f"POP >= {float(active_controls['target_min_pop']):.0%}, "
         f"max delta <= {float(active_controls['max_delta']):.2f}."
     )
+    _concentration_caption(target_summary)
+
+
+def _concentration_caption(target_summary: dict) -> None:
+    sector_concentration = target_summary.get("sector_concentration") or {}
+    theme_concentration = target_summary.get("theme_concentration") or {}
+    if not sector_concentration and not theme_concentration:
+        return
+
+    top_sectors = _top_concentration_labels(sector_concentration)
+    top_themes = _top_concentration_labels(theme_concentration)
+    parts = []
+    if top_sectors:
+        parts.append(f"Sector concentration: {top_sectors}")
+    if top_themes:
+        parts.append(f"Theme concentration: {top_themes}")
+    st.caption(" | ".join(parts))
+
+
+def _top_concentration_labels(values: dict, limit: int = 3) -> str:
+    sorted_values = sorted(values.items(), key=lambda item: item[1], reverse=True)
+    return ", ".join(f"{label} {pct:.1f}%" for label, pct in sorted_values[:limit])
 
 
 def _ranked_table(data: pd.DataFrame) -> None:
@@ -589,6 +659,31 @@ def _ranked_table(data: pd.DataFrame) -> None:
             "premium_vs_cash_risked_pct": st.column_config.NumberColumn(
                 "Premium vs Risk",
                 format="%.2f%%",
+            ),
+            "distance_to_strike_pct": st.column_config.NumberColumn(
+                "Distance to Strike",
+                format="%.2f%%",
+            ),
+            "distance_to_break_even_pct": st.column_config.NumberColumn(
+                "Distance to Break-even",
+                format="%.2f%%",
+            ),
+            "bid_ask_spread_pct": st.column_config.NumberColumn(
+                "Bid/Ask Spread",
+                format="%.2f%%",
+            ),
+            "iv_rank": st.column_config.NumberColumn("IV Rank", format="%.1f"),
+            "iv_percentile": st.column_config.NumberColumn(
+                "IV Percentile",
+                format="%.1f",
+            ),
+            "portfolio_concentration_pct": st.column_config.NumberColumn(
+                "Portfolio %",
+                format="%.2f%%",
+            ),
+            "max_loss_at_assignment_per_contract": st.column_config.NumberColumn(
+                "Max Loss / Contract",
+                format="$%.0f",
             ),
         },
     )

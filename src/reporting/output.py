@@ -24,6 +24,7 @@ def write_scan_outputs(
     sizing_result: PositionSizingResult,
     decision_log_path: Path,
     scan_config: ScanConfig,
+    premium_drop_counts: dict[str, int] | None = None,
     output_dir: Path = Path("logs"),
 ) -> ReportPaths:
     """Write ranked trade CSV/JSON, rejected JSON, and decision log path metadata."""
@@ -52,6 +53,9 @@ def write_scan_outputs(
         "unused_cash": float(sizing_result.unused_cash),
         "portfolio_value": float(_portfolio_value(sizing_result)),
         "free_cash": float(_free_cash(sizing_result)),
+        "sector_concentration": _capital_concentration(ranked_rows, key="sector"),
+        "theme_concentration": _theme_concentration(ranked_rows),
+        "premium_drop_counts": premium_drop_counts or {},
     }
 
     ranked_output = {
@@ -145,12 +149,23 @@ def _decision_to_row(
         "option_symbol": option.symbol,
         "expiration_date": option.expiration_date.date().isoformat(),
         "strike": _json_value(option.strike),
+        "underlying_price": _json_value(underlying.last_price),
         "bid": _json_value(option.bid),
         "ask": _json_value(option.ask),
+        "mid_price": _note_float(candidate.notes, "mid_price"),
+        "bid_ask_spread_pct": _note_float(candidate.notes, "bid_ask_spread_pct"),
+        "return_premium_basis": _note_string(candidate.notes, "return_premium_basis"),
         "delta": _json_value(option.delta),
         "implied_volatility": _json_value(option.implied_volatility),
+        "iv_rank": _note_float(candidate.notes, "iv_rank"),
+        "iv_percentile": _note_float(candidate.notes, "iv_percentile"),
         "open_interest": option.open_interest,
         "volume": option.volume,
+        "sector": _note_string(candidate.notes, "sector"),
+        "themes": _note_list(candidate.notes, "themes"),
+        "next_earnings_date": _note_string(candidate.notes, "next_earnings_date"),
+        "next_known_event_date": _note_string(candidate.notes, "next_known_event_date"),
+        "next_known_event_name": _note_string(candidate.notes, "next_known_event_name"),
         "portfolio_value": _json_value(_portfolio_value(decision)),
         "free_cash": _json_value(_free_cash(decision)),
         "probability_of_profit": _note_float(
@@ -161,6 +176,17 @@ def _decision_to_row(
         "pop_method": _note_string(candidate.notes, "pop_source"),
         "annualized_return": _note_float(candidate.notes, "annualized_return"),
         "break_even": _note_float(candidate.notes, "break_even"),
+        "distance_to_strike_pct": _note_float(candidate.notes, "distance_to_strike_pct"),
+        "distance_to_break_even_pct": _note_float(
+            candidate.notes,
+            "distance_to_break_even_pct",
+        ),
+        "assignment_cost_basis": _note_float(candidate.notes, "assignment_cost_basis"),
+        "max_loss_at_assignment_per_contract": _note_float(
+            candidate.notes,
+            "max_loss_at_assignment",
+        ),
+        "assignment_plan": _note_string(candidate.notes, "assignment_plan"),
         "ranking_mode_used": trade.ranking_mode_used,
         "pop_score": _json_value(trade.pop_score),
         "return_score": _json_value(trade.return_score),
@@ -172,6 +198,9 @@ def _decision_to_row(
         "max_allowed_contracts_by_ticker": decision.max_allowed_contracts_by_ticker,
         "suggested_contracts": suggested_contracts,
         "capital_required": _json_value(capital_required),
+        "portfolio_concentration_pct": _json_value(
+            _pct_of_value(capital_required, _portfolio_value(decision))
+        ),
         "market_premium_per_contract": _json_value(
             _market_premium_per_contract(decision)
         ),
@@ -193,6 +222,7 @@ def _scan_parameters(scan_config: ScanConfig) -> dict[str, Any]:
     mode_config = scan_config.ranking_modes[scan_config.ranking_mode]
     return {
         "ranking_mode": scan_config.ranking_mode,
+        "active_universe": scan_config.active_universe,
         "target_weekly_return_pct": scan_config.portfolio_targets.weekly_return_target_pct,
         "target_min_pop": scan_config.portfolio_targets.min_pop,
         "max_delta": mode_config.max_delta,
@@ -273,6 +303,14 @@ def _note_string(notes: list[str], key: str) -> str | None:
     return None
 
 
+def _note_list(notes: list[str], key: str) -> list[str]:
+    raw_value = _note_string(notes, key)
+    if raw_value is None:
+        return []
+
+    return [value for value in (item.strip() for item in raw_value.split(",")) if value]
+
+
 def _market_premium_per_contract(decision: PositionSizingDecision) -> Decimal:
     option = decision.ranked_trade.candidate.option
     return option.bid * Decimal("100")
@@ -286,3 +324,54 @@ def _premium_vs_cash_risked_pct(
         return None
 
     return (premium_captured / capital_required) * Decimal("100")
+
+
+def _pct_of_value(value: Decimal, total: Decimal) -> Decimal | None:
+    if total <= 0:
+        return None
+
+    return (value / total) * Decimal("100")
+
+
+def _capital_concentration(rows: list[dict[str, Any]], *, key: str) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for row in rows:
+        label = row.get(key) or "Unknown"
+        capital = row.get("capital_required") or 0
+        totals[str(label)] = totals.get(str(label), 0.0) + float(capital)
+
+    portfolio_value = _portfolio_value_from_rows(rows)
+    if portfolio_value <= 0:
+        return totals
+
+    return {
+        label: round((capital / portfolio_value) * 100, 2)
+        for label, capital in sorted(totals.items())
+    }
+
+
+def _theme_concentration(rows: list[dict[str, Any]]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for row in rows:
+        themes = row.get("themes") or ["Unknown"]
+        capital = row.get("capital_required") or 0
+        for theme in themes:
+            totals[str(theme)] = totals.get(str(theme), 0.0) + float(capital)
+
+    portfolio_value = _portfolio_value_from_rows(rows)
+    if portfolio_value <= 0:
+        return totals
+
+    return {
+        label: round((capital / portfolio_value) * 100, 2)
+        for label, capital in sorted(totals.items())
+    }
+
+
+def _portfolio_value_from_rows(rows: list[dict[str, Any]]) -> float:
+    for row in rows:
+        value = row.get("portfolio_value")
+        if value:
+            return float(value)
+
+    return 0.0
