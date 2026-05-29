@@ -20,7 +20,6 @@ REVIEW_FLAGS = frozenset(
         RiskFlag.DATA_QUALITY_WARNING,
         RiskFlag.POP_ESTIMATE_CONFLICT,
         RiskFlag.KNOWN_EVENT_NEAR_EXPIRATION,
-        RiskFlag.EARNINGS_DATA_UNAVAILABLE,
     }
 )
 

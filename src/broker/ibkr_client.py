@@ -671,6 +671,11 @@ class IbkrClient(Broker):
         data_quality_warnings = _data_quality_warnings(snapshot)
         if snapshot.unavailable_fields:
             displayed_fields = _display_unavailable_fields(snapshot.unavailable_fields)
+            # Option volume is often absent even when regular volume is present, and
+            # the scanner can be configured not to require it.
+            displayed_fields = [
+                field for field in displayed_fields if field != "option_volume"
+            ]
             if displayed_fields:
                 data_quality_warnings.append(
                     "missing_fields:" + ",".join(displayed_fields)

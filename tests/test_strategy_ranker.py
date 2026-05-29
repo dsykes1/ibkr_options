@@ -233,3 +233,14 @@ def test_classify_eligibility_uses_hard_pop_override() -> None:
         )
         == EligibilityStatus.ELIGIBLE
     )
+
+
+def test_missing_earnings_data_warns_without_forcing_review() -> None:
+    assert (
+        classify_eligibility(
+            probability_of_profit=0.98,
+            risk_flags=[RiskFlag.EARNINGS_DATA_UNAVAILABLE],
+            mode="ultra_safe",
+        )
+        == EligibilityStatus.ELIGIBLE_WITH_FLAGS
+    )

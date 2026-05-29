@@ -102,6 +102,29 @@ def test_normalize_option_quote_rejects_missing_bid_ask_even_with_model_price() 
     assert quote is None
 
 
+def test_normalize_option_quote_ignores_missing_option_volume_warning() -> None:
+    client = IbkrClient(
+        IbkrClientConfig(host="127.0.0.1", port=7497, client_id=1),
+        logger=logging.getLogger(__name__),
+    )
+    definition = _OptionDefinition("AAPL", "SMART", "AAPL", "100", "20260501", Decimal("245"), "P")
+    snapshot = IbkrMarketDataSnapshot(
+        bid=Decimal("1.00"),
+        ask=Decimal("1.10"),
+        implied_volatility=Decimal("0.25"),
+        delta=Decimal("-0.20"),
+        open_interest=500,
+        volume=100,
+        market_data_type="live",
+        unavailable_fields=["option_volume"],
+    )
+
+    quote = client._normalize_option_quote(definition, snapshot)
+
+    assert quote is not None
+    assert quote.data_quality_warnings == []
+
+
 def test_display_unavailable_fields_omits_option_volume_when_other_fields_missing() -> None:
     assert _display_unavailable_fields(["bid", "option_volume"]) == ["bid"]
     assert _display_unavailable_fields(["bid", "ask", "option_volume"]) == ["bid", "ask"]
