@@ -136,3 +136,21 @@ def test_position_sizing_handles_zero_contract_cases() -> None:
     assert result.decisions[0].skip_reason == "constraints_allow_zero_contracts"
     assert result.decisions[1].suggested_contracts == 0
     assert result.decisions[1].skip_reason == "rejected_trade"
+
+
+def test_position_sizing_skips_manual_review_trades() -> None:
+    result = size_ranked_trades(
+        [
+            _ranked_trade(
+                symbol="AAPL",
+                rank=1,
+                eligibility_status=EligibilityStatus.REVIEW,
+            ),
+            _ranked_trade(symbol="MSFT", rank=2),
+        ],
+        _scan_config(account_size=20_000, max_positions=3, max_per_ticker_exposure=10_000),
+    )
+
+    assert result.decisions[0].suggested_contracts == 0
+    assert result.decisions[0].skip_reason == "manual_review_required"
+    assert result.decisions[1].suggested_contracts == 1

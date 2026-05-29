@@ -68,6 +68,7 @@ class DefaultFiltersConfig(BaseModel):
     min_option_volume: int = Field(default=0, ge=0)
     min_open_interest: int = Field(default=0, ge=0)
     max_bid_ask_spread_pct: float | None = Field(default=None, ge=0)
+    min_distance_to_strike_pct: float | None = Field(default=None, ge=0)
     min_days_to_expiration: int = Field(default=0, ge=0)
     max_days_to_expiration: int = Field(default=7, ge=0)
     exclude_earnings_within_days: int | None = Field(default=None, ge=0)

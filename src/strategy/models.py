@@ -22,6 +22,9 @@ class RiskFlag(StrEnum):
     BELOW_MINIMUM_PREMIUM = "below_minimum_premium"
     ABOVE_MAX_DELTA = "above_max_delta"
     BELOW_TARGET_RETURN = "below_target_return"
+    POP_ESTIMATE_CONFLICT = "pop_estimate_conflict"
+    TOO_CLOSE_TO_MONEY = "too_close_to_money"
+    EARNINGS_DATA_UNAVAILABLE = "earnings_data_unavailable"
 
 
 class EligibilityStatus(StrEnum):

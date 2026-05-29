@@ -173,7 +173,11 @@ def _decision_to_row(
             "probability_of_profit",
         )
         or _note_float(candidate.notes, "modeled_pop"),
+        "modeled_pop": _note_float(candidate.notes, "modeled_pop"),
+        "delta_proxy_pop": _note_float(candidate.notes, "delta_proxy_pop"),
+        "pop_estimate_gap": _note_float(candidate.notes, "pop_estimate_gap"),
         "pop_method": _note_string(candidate.notes, "pop_source"),
+        "review_required": _review_required(candidate.risk_flags),
         "annualized_return": _note_float(candidate.notes, "annualized_return"),
         "break_even": _note_float(candidate.notes, "break_even"),
         "distance_to_strike_pct": _note_float(candidate.notes, "distance_to_strike_pct"),
@@ -193,6 +197,7 @@ def _decision_to_row(
         "liquidity_score": _json_value(trade.liquidity_score),
         "premium_score": _json_value(trade.premium_score),
         "final_score": _json_value(trade.final_score),
+        "eligibility_status": trade.eligibility_status.value,
         "risk_flags": [flag.value for flag in candidate.risk_flags],
         "collateral_per_contract": _json_value(decision.collateral_per_contract),
         "max_allowed_contracts_by_ticker": decision.max_allowed_contracts_by_ticker,
@@ -227,6 +232,19 @@ def _scan_parameters(scan_config: ScanConfig) -> dict[str, Any]:
         "target_min_pop": scan_config.portfolio_targets.min_pop,
         "max_delta": mode_config.max_delta,
     }
+
+
+def _review_required(risk_flags) -> bool:
+    review_flags = {
+        "low_liquidity",
+        "wide_spread",
+        "data_quality_warning",
+        "pop_estimate_conflict",
+        "known_event_near_expiration",
+        "too_close_to_money",
+        "earnings_data_unavailable",
+    }
+    return any(getattr(flag, "value", str(flag)) in review_flags for flag in risk_flags)
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:

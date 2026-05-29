@@ -29,6 +29,9 @@ from strategy.models import CandidateTrade, RiskFlag
 from strategy.ranker import RankerInput, rank_candidates
 
 
+POP_ESTIMATE_CONFLICT_THRESHOLD = 0.15
+
+
 @dataclass(frozen=True)
 class ScanResult:
     ranked_trades: list
@@ -42,12 +45,15 @@ def run_mock_scan(
     settings: Settings,
     broker: Broker | None = None,
     output_dir: Path = Path("logs"),
-    as_of: date = MOCK_AS_OF,
+    as_of: date | None = None,
     expiration_date: date | None = None,
 ) -> ScanResult:
     """Run an end-to-end cash-secured put scan using a broker adapter."""
     decision_logger = DecisionLogger()
     broker = broker or MockBroker()
+    effective_as_of = as_of or (
+        MOCK_AS_OF if isinstance(broker, MockBroker) else date.today()
+    )
     broker.connect()
     decision_logger.record(f"Connected to {broker.__class__.__name__}.")
 
@@ -81,20 +87,20 @@ def run_mock_scan(
         quotes,
         effective_scan_config,
         decision_logger,
-        as_of=as_of,
+        as_of=effective_as_of,
     )
     decision_logger.record(
         f"After pre-scan filter: {len(quotes)} underlyings remain."
     )
 
-    selected_expiration = expiration_date or same_week_friday(as_of)
+    selected_expiration = expiration_date or same_week_friday(effective_as_of)
     decision_logger.record(f"Selected expiration: {selected_expiration.isoformat()}.")
     chains = fetch_option_chains_for_expiry(
         broker=broker,
         symbols=list(quotes),
         scan_config=effective_scan_config,
         expiration_date=selected_expiration,
-        as_of=as_of,
+        as_of=effective_as_of,
         underlying_quotes=quotes,
     )
     decision_logger.record(
@@ -111,7 +117,7 @@ def run_mock_scan(
                 underlying=underlying,
                 option=option,
                 settings=effective_settings,
-                as_of=as_of,
+                as_of=effective_as_of,
                 decision_logger=decision_logger,
             )
             if not _meets_target_premium_vs_strike(ranker_input, effective_settings):
@@ -217,15 +223,9 @@ def _evaluate_option(
     fallback_pop = (
         delta_proxy_pop(float(option.delta)) if option.delta is not None else None
     )
-    probability_of_profit = (
-        modeled_pop if modeled_pop is not None else fallback_pop
-    )
-    pop_source = (
-        "black_scholes"
-        if modeled_pop is not None
-        else "delta_proxy"
-        if fallback_pop is not None
-        else "unavailable"
+    probability_of_profit, pop_source = _select_probability_of_profit(
+        modeled_pop=modeled_pop,
+        delta_proxy_pop=fallback_pop,
     )
     annualized = annualized_return(
         premium=float(executable_premium),
@@ -264,12 +264,22 @@ def _evaluate_option(
             settings=settings,
         )
     )
+    pop_estimate_gap = _pop_estimate_gap(modeled_pop, fallback_pop)
+    if (
+        pop_estimate_gap is not None
+        and pop_estimate_gap >= POP_ESTIMATE_CONFLICT_THRESHOLD
+    ):
+        risk_flags.append(RiskFlag.POP_ESTIMATE_CONFLICT)
+    if _too_close_to_money(distance_to_strike, settings):
+        risk_flags.append(RiskFlag.TOO_CLOSE_TO_MONEY)
     if _event_within_window(
         metadata.next_known_event_date if metadata is not None else None,
         as_of=as_of,
         window_days=settings.scanner.default_filters.exclude_earnings_within_days,
     ):
         risk_flags.append(RiskFlag.KNOWN_EVENT_NEAR_EXPIRATION)
+    if _earnings_data_unavailable(metadata):
+        risk_flags.append(RiskFlag.EARNINGS_DATA_UNAVAILABLE)
     if not _has_tradeable_bid_ask(option):
         risk_flags.append(RiskFlag.DATA_QUALITY_WARNING)
         probability_of_profit = None
@@ -310,6 +320,7 @@ def _evaluate_option(
             "return_premium_basis=bid",
             f"modeled_pop={modeled_pop}",
             f"delta_proxy_pop={fallback_pop}",
+            f"pop_estimate_gap={pop_estimate_gap}",
             f"probability_of_profit={probability_of_profit}",
             f"pop_source={pop_source}",
             f"annualized_return={annualized}",
@@ -339,6 +350,57 @@ def _evaluate_option(
         annualized_return=annualized,
         liquidity_score=option_liquidity_score,
         premium=float(executable_premium),
+    )
+
+
+def _select_probability_of_profit(
+    *,
+    modeled_pop: float | None,
+    delta_proxy_pop: float | None,
+) -> tuple[float | None, str]:
+    """Choose a conservative POP when multiple imperfect estimates are available."""
+    if modeled_pop is not None and delta_proxy_pop is not None:
+        if delta_proxy_pop < modeled_pop:
+            return delta_proxy_pop, "delta_proxy_conservative"
+        return modeled_pop, "black_scholes_conservative"
+
+    if modeled_pop is not None:
+        return modeled_pop, "black_scholes"
+
+    if delta_proxy_pop is not None:
+        return delta_proxy_pop, "delta_proxy"
+
+    return None, "unavailable"
+
+
+def _pop_estimate_gap(
+    modeled_pop: float | None,
+    delta_proxy_pop: float | None,
+) -> float | None:
+    if modeled_pop is None or delta_proxy_pop is None:
+        return None
+
+    return abs(modeled_pop - delta_proxy_pop)
+
+
+def _too_close_to_money(
+    distance_to_strike: float | None,
+    settings: Settings,
+) -> bool:
+    minimum = settings.scanner.default_filters.min_distance_to_strike_pct
+    if minimum is None:
+        return False
+
+    return distance_to_strike is None or distance_to_strike < minimum
+
+
+def _earnings_data_unavailable(metadata) -> bool:
+    if metadata is None:
+        return True
+
+    return (
+        metadata.next_earnings_date is None
+        and metadata.next_known_event_date is None
     )
 
 

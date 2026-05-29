@@ -1,4 +1,6 @@
 import json
+from datetime import date
+from decimal import Decimal
 
 from configuration import load_settings
 from broker.mock_broker import (
@@ -8,6 +10,8 @@ from broker.mock_broker import (
     MockBroker,
     NEXT_FRIDAY,
 )
+from broker.contracts import expiry_datetime
+from data.models import OptionQuote, UnderlyingQuote
 from strategy.csp_scanner import run_mock_scan
 from strategy.models import EligibilityStatus, RiskFlag
 
@@ -194,6 +198,68 @@ def test_run_mock_scan_can_target_specific_expiration(tmp_path) -> None:
         trade.candidate.option.expiration_date.date()
         for trade in result.ranked_trades
     } == {NEXT_FRIDAY}
+
+
+def test_scan_uses_delta_pop_when_model_pop_is_overoptimistic(tmp_path) -> None:
+    settings = load_settings()
+    scanner = settings.scanner.model_copy(
+        update={
+            "active_universe": "targeted",
+            "universes": {"targeted": ["GM"]},
+        }
+    )
+    settings = settings.model_copy(update={"scanner": scanner})
+    expiration = date(2026, 6, 5)
+    broker = MockBroker(
+        underlying_quotes={
+            "GM": UnderlyingQuote(
+                symbol="GM",
+                last_price=Decimal("83.065"),
+                bid=Decimal("83.06"),
+                ask=Decimal("83.07"),
+                volume=10_000_000,
+            )
+        },
+        option_chains={
+            "GM": [
+                OptionQuote(
+                    symbol="GM 2026-06-05 83P",
+                    underlying_symbol="GM",
+                    expiration_date=expiry_datetime(expiration),
+                    strike=Decimal("83"),
+                    option_type="put",
+                    bid=Decimal("1.47"),
+                    ask=Decimal("1.65"),
+                    last_price=Decimal("1.56"),
+                    volume=14,
+                    open_interest=57,
+                    implied_volatility=Decimal("0.03513799701844638"),
+                    delta=Decimal("-0.3105673729374074"),
+                )
+            ]
+        },
+    )
+
+    result = run_mock_scan(
+        settings,
+        broker=broker,
+        output_dir=tmp_path,
+        as_of=date(2026, 5, 29),
+        expiration_date=expiration,
+    )
+
+    gm_trade = next(
+        trade
+        for trade in result.ranked_trades
+        if trade.candidate.underlying.symbol == "GM"
+    )
+    assert (
+        f"probability_of_profit={1 - 0.3105673729374074}"
+        in gm_trade.candidate.notes
+    )
+    assert "pop_source=delta_proxy_conservative" in gm_trade.candidate.notes
+    assert RiskFlag.POP_ESTIMATE_CONFLICT in gm_trade.candidate.risk_flags
+    assert gm_trade.eligibility_status == EligibilityStatus.REJECTED
 
 
 def test_scan_rejects_zero_bid_options_as_untradeable(tmp_path) -> None:

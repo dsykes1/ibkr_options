@@ -127,10 +127,10 @@ def test_risk_flags_apply_mode_specific_penalties_and_classification() -> None:
         mode="capital_efficient",
     )
 
-    assert ultra_safe.eligibility_status == EligibilityStatus.ELIGIBLE_WITH_FLAGS
-    assert ultra_safe.final_score == Decimal("80")
-    assert capital_efficient.eligibility_status == EligibilityStatus.ELIGIBLE_WITH_FLAGS
-    assert capital_efficient.final_score == Decimal("88")
+    assert ultra_safe.eligibility_status == EligibilityStatus.REVIEW
+    assert ultra_safe.final_score == Decimal("0")
+    assert capital_efficient.eligibility_status == EligibilityStatus.REVIEW
+    assert capital_efficient.final_score == Decimal("0")
 
 
 def test_rejection_flags_reject_candidate_after_scoring() -> None:
@@ -194,7 +194,7 @@ def test_classify_eligibility_handles_clean_flagged_and_rejected_cases() -> None
             risk_flags=[RiskFlag.WIDE_SPREAD],
             mode="ultra_safe",
         )
-        == EligibilityStatus.ELIGIBLE_WITH_FLAGS
+            == EligibilityStatus.REVIEW
     )
     assert (
         classify_eligibility(

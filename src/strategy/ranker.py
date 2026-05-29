@@ -13,6 +13,18 @@ from strategy.models import CandidateTrade, EligibilityStatus, RankedTrade, Risk
 RankingMode = Literal["ultra_safe", "capital_efficient"]
 
 
+REVIEW_FLAGS = frozenset(
+    {
+        RiskFlag.LOW_LIQUIDITY,
+        RiskFlag.WIDE_SPREAD,
+        RiskFlag.DATA_QUALITY_WARNING,
+        RiskFlag.POP_ESTIMATE_CONFLICT,
+        RiskFlag.KNOWN_EVENT_NEAR_EXPIRATION,
+        RiskFlag.EARNINGS_DATA_UNAVAILABLE,
+    }
+)
+
+
 @dataclass(frozen=True)
 class RankingModeSpec:
     name: RankingMode
@@ -53,6 +65,7 @@ MODE_SPECS: dict[RankingMode, RankingModeSpec] = {
                 RiskFlag.INSUFFICIENT_CASH,
                 RiskFlag.CONCENTRATION_RISK,
                 RiskFlag.HIGH_POSITION_CONCENTRATION,
+                RiskFlag.TOO_CLOSE_TO_MONEY,
             }
         ),
     ),
@@ -80,6 +93,7 @@ MODE_SPECS: dict[RankingMode, RankingModeSpec] = {
                 RiskFlag.INSUFFICIENT_CASH,
                 RiskFlag.CONCENTRATION_RISK,
                 RiskFlag.HIGH_POSITION_CONCENTRATION,
+                RiskFlag.TOO_CLOSE_TO_MONEY,
             }
         ),
     ),
@@ -112,7 +126,7 @@ def rank_candidates(
     ]
     ranked.sort(
         key=lambda trade: (
-            trade.eligibility_status == EligibilityStatus.REJECTED,
+            _eligibility_sort_order(trade.eligibility_status),
             -trade.final_score,
         )
     )
@@ -157,6 +171,9 @@ def classify_eligibility(
     if spec.rejection_flags.intersection(risk_flags):
         return EligibilityStatus.REJECTED
 
+    if REVIEW_FLAGS.intersection(risk_flags):
+        return EligibilityStatus.REVIEW
+
     if risk_flags:
         return EligibilityStatus.ELIGIBLE_WITH_FLAGS
 
@@ -197,7 +214,7 @@ def _rank_single(
         hard_pop_min_override=spec.hard_pop_min,
     )
 
-    if eligibility_status == EligibilityStatus.REJECTED:
+    if eligibility_status in {EligibilityStatus.REJECTED, EligibilityStatus.REVIEW}:
         final_score = 0
 
     rationale = _build_rationale(
@@ -254,6 +271,14 @@ def _score_liquidity(value: float | None) -> float:
 
 def _risk_penalty(risk_flags: list[RiskFlag], spec: RankingModeSpec) -> float:
     return sum(spec.flag_penalties.get(flag, 0) for flag in risk_flags)
+
+
+def _eligibility_sort_order(status: EligibilityStatus) -> int:
+    if status in {EligibilityStatus.ELIGIBLE, EligibilityStatus.ELIGIBLE_WITH_FLAGS}:
+        return 0
+    if status == EligibilityStatus.REVIEW:
+        return 1
+    return 2
 
 
 def _spec_for_mode(

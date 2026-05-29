@@ -246,6 +246,9 @@ def _initial_skip_reason(
     if ranked_trade.eligibility_status == EligibilityStatus.REJECTED:
         return "rejected_trade"
 
+    if ranked_trade.eligibility_status == EligibilityStatus.REVIEW:
+        return "manual_review_required"
+
     if collateral_per_contract <= 0:
         return "invalid_collateral"
 

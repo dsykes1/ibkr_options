@@ -43,12 +43,20 @@ DISPLAY_COLUMNS = [
     "market_premium_total",
     "premium_vs_cash_risked_pct",
     "probability_of_profit",
+    "modeled_pop",
+    "delta_proxy_pop",
+    "pop_estimate_gap",
+    "pop_method",
     "annualized_return",
     "portfolio_concentration_pct",
     "max_loss_at_assignment_per_contract",
     "final_score",
     "suggested_contracts",
     "capital_required",
+    "eligibility_status",
+    "review_required",
+    "risk_flags_display",
+    "rationale_display",
     "target_eligible",
 ]
 
@@ -423,8 +431,12 @@ def _load_results(path: Path) -> tuple[pd.DataFrame, dict, dict]:
     data["risk_flags_display"] = data["risk_flags"].apply(
         lambda flags: ", ".join(flags) if flags else ""
     )
+    data["rationale_display"] = data["rationale"].apply(_format_rationale) if "rationale" in data else ""
     for column in [
         "probability_of_profit",
+        "modeled_pop",
+        "delta_proxy_pop",
+        "pop_estimate_gap",
         "annualized_return",
         "final_score",
         "pop_score",
@@ -451,6 +463,8 @@ def _load_results(path: Path) -> tuple[pd.DataFrame, dict, dict]:
 
     if "target_eligible" not in data:
         data["target_eligible"] = True
+    if "review_required" not in data:
+        data["review_required"] = False
 
     return data, target_summary, scan_parameters
 
@@ -475,6 +489,7 @@ def _filters(data: pd.DataFrame) -> pd.DataFrame:
         selected_flags = st.multiselect("Flags", options=all_flags)
 
         target_eligible_only = st.checkbox("Target-eligible trades only", value=False)
+        hide_review_required = st.checkbox("Hide manual-review trades", value=False)
         min_pop = st.slider("Minimum POP", 0.0, 1.0, 0.0, 0.01)
         min_return = st.slider("Minimum annualized return", 0.0, 3.0, 0.0, 0.01)
 
@@ -493,6 +508,9 @@ def _filters(data: pd.DataFrame) -> pd.DataFrame:
 
     if target_eligible_only and "target_eligible" in filtered.columns:
         filtered = filtered[filtered["target_eligible"].fillna(True)]
+
+    if hide_review_required and "review_required" in filtered.columns:
+        filtered = filtered[~filtered["review_required"].fillna(False)]
 
     if selected_flags:
         filtered = filtered[
@@ -635,10 +653,26 @@ def _ranked_table(data: pd.DataFrame) -> None:
                 format="%d",
             ),
             "probability_of_profit": st.column_config.NumberColumn(
-                "POP",
+                "Selected POP",
+                format="%.1%%",
+            ),
+            "modeled_pop": st.column_config.NumberColumn(
+                "Model POP",
+                format="%.1%%",
+            ),
+            "delta_proxy_pop": st.column_config.NumberColumn(
+                "Delta POP",
+                format="%.1%%",
+            ),
+            "pop_estimate_gap": st.column_config.NumberColumn(
+                "POP Gap",
                 format="%.1%%",
             ),
             "pop_method": st.column_config.TextColumn("POP Method"),
+            "review_required": st.column_config.CheckboxColumn("Review"),
+            "eligibility_status": st.column_config.TextColumn("Status"),
+            "risk_flags_display": st.column_config.TextColumn("Flags"),
+            "rationale_display": st.column_config.TextColumn("Rationale"),
             "annualized_return": st.column_config.NumberColumn(
                 "Annualized Return",
                 format="%.1%%",
@@ -760,6 +794,25 @@ def _parse_flags(value: Any) -> list[str]:
             return [str(flag) for flag in parsed]
 
     return []
+
+
+def _format_rationale(value: Any) -> str:
+    if isinstance(value, list):
+        return " | ".join(str(item) for item in value)
+
+    if pd.isna(value) or value == "":
+        return ""
+
+    if isinstance(value, str):
+        try:
+            parsed = ast.literal_eval(value)
+        except (SyntaxError, ValueError):
+            return value
+
+        if isinstance(parsed, list):
+            return " | ".join(str(item) for item in parsed)
+
+    return str(value)
 
 
 def _format_pct(value: float) -> str:

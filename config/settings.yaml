@@ -215,9 +215,10 @@ scanner:
   default_filters:
     min_underlying_price: 10
     max_underlying_price: null
-    min_option_volume: 10
-    min_open_interest: 100
-    max_bid_ask_spread_pct: 5
+    min_option_volume: 50
+    min_open_interest: 250
+    max_bid_ask_spread_pct: 10
+    min_distance_to_strike_pct: 3
     min_days_to_expiration: 1
     max_days_to_expiration: 7
     exclude_earnings_within_days: 7
@@ -228,7 +229,7 @@ scanner:
       description: Prioritize conservative cash-secured put candidates.
       min_premium: 20
       min_annualized_return_pct: 8
-      max_delta: 0.25
+      max_delta: 0.2
       prefer_lower_assignment_risk: true
     capital_efficient:
       name: capital_efficient
@@ -236,6 +237,6 @@ scanner:
       description: Prioritize efficient use of available cash while staying within risk limits.
       min_premium: 15
       min_annualized_return_pct: 12
-      max_delta: 0.35
+      max_delta: 0.2
       open_interest_contract_limit_pct: 1.0
       prefer_lower_assignment_risk: false

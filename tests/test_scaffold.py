@@ -19,7 +19,10 @@ def test_load_settings_reads_default_config() -> None:
     assert {"TQQQ", "SOXL", "IREN", "CRWV"}.issubset(
         settings.scanner.universes["targeted"]
     )
-    assert settings.scanner.default_filters.max_bid_ask_spread_pct == 5
+    assert settings.scanner.default_filters.max_bid_ask_spread_pct == 10
+    assert settings.scanner.default_filters.min_option_volume == 50
+    assert settings.scanner.default_filters.min_open_interest == 250
+    assert settings.scanner.default_filters.min_distance_to_strike_pct == 3
     assert {"TQQQ", "SOXL", "IREN", "CRWV"}.issubset(settings.scanner.universe)
     assert settings.scanner.universe_discovery.exclude_leveraged_etfs is False
     assert settings.scanner.ranking_mode == "capital_efficient"
@@ -37,4 +40,6 @@ def test_scan_command_is_available() -> None:
 
 def test_domain_enums_are_string_values() -> None:
     assert RiskFlag.LOW_LIQUIDITY == "low_liquidity"
+    assert RiskFlag.POP_ESTIMATE_CONFLICT == "pop_estimate_conflict"
+    assert RiskFlag.TOO_CLOSE_TO_MONEY == "too_close_to_money"
     assert EligibilityStatus.ELIGIBLE == "eligible"
